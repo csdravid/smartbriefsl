@@ -2375,6 +2375,7 @@ def generate_best_of_multiple_attempts(
     reliability_mode: str,
     attempts: int = 3,
     preferred_url: str | None = None,
+    attempt_start_index: int = 0,
 ) -> Dict[str, Any]:
     """
     Run multiple search + generation attempts and return the best candidate.
@@ -2394,7 +2395,7 @@ def generate_best_of_multiple_attempts(
             time.sleep(min(2.5, 0.85 * idx))
 
         attempt_info: Dict[str, Any] = {
-            "attempt": idx + 1,
+            "attempt": attempt_start_index + idx + 1,
             "results": 0,
             "real_results": 0,
             "evidence_score": None,
@@ -2769,10 +2770,40 @@ def main() -> None:
                         reliability_mode=reliability_mode,
                         attempts=3,
                         preferred_url=preferred_url,
+                        attempt_start_index=0,
                     )
-                    st.session_state["last_run_diagnostics"] = run
                     best_candidate = run.get("best_candidate")
                     best_evidence_seen = run.get("best_evidence_seen")
+
+                    # Adaptive extension: only escalate beyond 3 if needed.
+                    if not best_candidate:
+                        status.update(label="Still searching for stable signal...", state="running")
+                        run_extra = generate_best_of_multiple_attempts(
+                            startup_name=startup_name,
+                            reliability_mode=reliability_mode,
+                            attempts=2,
+                            preferred_url=preferred_url,
+                            attempt_start_index=3,
+                        )
+                        extra_candidate = run_extra.get("best_candidate")
+                        if extra_candidate:
+                            best_candidate = extra_candidate
+                        if (
+                            best_evidence_seen is None
+                            or (
+                                run_extra.get("best_evidence_seen")
+                                and run_extra["best_evidence_seen"].get("score", 0) > best_evidence_seen.get("score", 0)
+                            )
+                        ):
+                            best_evidence_seen = run_extra.get("best_evidence_seen")
+
+                        run["attempt_stats"] = (run.get("attempt_stats") or []) + (run_extra.get("attempt_stats") or [])
+                        run["attempt_errors"] = (run.get("attempt_errors") or []) + (run_extra.get("attempt_errors") or [])
+                        run["no_signal_attempts"] = int(run.get("no_signal_attempts", 0)) + int(run_extra.get("no_signal_attempts", 0))
+                        if not run.get("best_candidate") and extra_candidate:
+                            run["best_candidate"] = extra_candidate
+
+                    st.session_state["last_run_diagnostics"] = run
 
                     if not best_candidate:
                         if run.get("no_signal_attempts", 0) >= 3:
