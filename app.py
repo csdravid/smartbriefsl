@@ -19,6 +19,8 @@ from openai import OpenAI
 
 EUROUS_LOGO_URL = "https://eurousventures.com/wp-content/uploads/2024/11/logo_eurousventures_2025_.png"
 EUROUS_FAVICON_URL = "https://eurousventures.com/favicon.ico"
+BACKGROUND_VIDEO_CANDIDATES = [
+]
 
 st.set_page_config(
     page_title="EuroUS Intelligence",
@@ -81,13 +83,20 @@ def inject_mobile_and_print_css() -> None:
 
     html, body, [data-testid="stAppViewContainer"] {
         background-color: var(--eurous-bg) !important;
+        background-image: none !important;
         color: var(--eurous-navy-1) !important;
         font-family: var(--font-body);
         overflow-y: auto !important;
     }
+    [data-testid="stAppViewContainer"] {
+        position: relative !important;
+    }
+    .lineart-stage {
+        display: none !important;
+    }
     [data-testid="stAppViewContainer"] .main .block-container {
-        max-width: 800px !important;
-        width: min(100%, 800px) !important;
+        max-width: 920px !important;
+        width: min(100%, 920px) !important;
         margin-left: auto !important;
         margin-right: auto !important;
         padding-left: 0.8rem !important;
@@ -107,15 +116,26 @@ def inject_mobile_and_print_css() -> None:
         padding-bottom: var(--space-6);
         padding-left: 0.8rem;
         padding-right: 0.8rem;
-        max-width: 800px;
+        max-width: 920px;
         margin: 0 auto;
-        background-color: #eef3f9;
+        background-color: #eef3f9 !important;
         border: 1px solid #c6d6e8;
         border-radius: var(--radius-lg);
         box-shadow: none;
         overflow: visible;
         max-height: none !important;
         animation: pageEnter 700ms var(--ease-out) both;
+        position: relative;
+        z-index: 1;
+        isolation: isolate;
+    }
+    .block-container::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: #eef3f9;
+        z-index: -1;
+        pointer-events: none;
     }
 
     .shift-hero {
@@ -297,10 +317,29 @@ def inject_mobile_and_print_css() -> None:
         color: #EEF4FF !important;
         -webkit-text-fill-color: #EEF4FF !important;
     }
+    .stDownloadButton > button,
+    .stDownloadButton > button span,
+    .stDownloadButton > button p,
+    .stDownloadButton > button div {
+        color: #EEF4FF !important;
+        -webkit-text-fill-color: #EEF4FF !important;
+    }
+    .stDownloadButton > button {
+        background-color: #054a91 !important;
+        border: 1px solid #3e7cb1 !important;
+    }
     .stButton > button:disabled,
     .stButton > button:disabled span,
     .stButton > button:disabled p,
     .stButton > button:disabled div {
+        color: #AFC0E8 !important;
+        -webkit-text-fill-color: #AFC0E8 !important;
+        opacity: 1 !important;
+    }
+    .stDownloadButton > button:disabled,
+    .stDownloadButton > button:disabled span,
+    .stDownloadButton > button:disabled p,
+    .stDownloadButton > button:disabled div {
         color: #AFC0E8 !important;
         -webkit-text-fill-color: #AFC0E8 !important;
         opacity: 1 !important;
@@ -325,6 +364,14 @@ def inject_mobile_and_print_css() -> None:
     .stButton > button:hover {
         transform: translateY(-1px);
         box-shadow: none;
+    }
+    .stDownloadButton > button:hover,
+    .stDownloadButton > button:active,
+    .stDownloadButton > button:focus {
+        background-color: #09316c !important;
+        border-color: #3e7cb1 !important;
+        color: #EEF4FF !important;
+        -webkit-text-fill-color: #EEF4FF !important;
     }
 
     .stTextInput > div > div > input {
@@ -512,25 +559,83 @@ def inject_mobile_and_print_css() -> None:
         font-size: 0.78rem !important;
     }
     [data-testid="stToggle"] [role="switch"] {
-        transform: scale(1.18);
-        transform-origin: right center;
-        box-shadow: 0 0 0 1px rgba(5, 74, 145, 0.35);
-        border: 1px solid #054a91 !important;
-        background: #E5E8F0 !important;
+        isolation: isolate;
+        position: relative;
+        width: 60px !important;
+        min-width: 60px !important;
+        height: 30px !important;
+        border-radius: 15px !important;
+        border: none !important;
+        overflow: hidden !important;
+        background: #ecf0f3 !important;
+        box-shadow:
+            -8px -4px 8px 0px #ffffff,
+            8px 4px 12px 0px #d1d9e6,
+            4px 4px 4px 0px #d1d9e6 inset,
+            -4px -4px 4px 0px #ffffff inset !important;
         opacity: 1 !important;
         filter: none !important;
+        transform: none !important;
+        transition: background 0.4s cubic-bezier(0.85, 0.05, 0.18, 1.35), box-shadow 0.35s ease !important;
     }
     [data-testid="stToggle"] [role="switch"][aria-checked="true"] {
-        background: #054a91 !important;
-        border-color: #054a91 !important;
+        background: #dbe4ee !important;
         opacity: 1 !important;
     }
     [data-testid="stToggle"] [role="switch"] > div {
-        background: #FFFFFF !important;
-        border: 1px solid #CBD8F0 !important;
+        width: 30px !important;
+        height: 30px !important;
+        border-radius: 15px !important;
+        margin: 0 !important;
+        background: #ecf0f3 !important;
+        border: none !important;
+        box-shadow:
+            -8px -4px 8px 0px #ffffff,
+            8px 4px 12px 0px #d1d9e6 !important;
+        transition: transform 0.4s cubic-bezier(0.85, 0.05, 0.18, 1.35), background 0.3s ease !important;
+    }
+    [data-testid="stToggle"] [role="switch"][aria-checked="true"] > div {
+        transform: translateX(30px) !important;
+        background: #3e7cb1 !important;
     }
     [data-testid="stToggle"] input {
         opacity: 1 !important;
+    }
+    /* Hard override: draw neumorphic toggle via pseudo-element. */
+    [data-testid="stToggle"] button[role="switch"] {
+        position: relative !important;
+        width: 60px !important;
+        min-width: 60px !important;
+        height: 30px !important;
+        border-radius: 15px !important;
+        border: none !important;
+        background: #ecf0f3 !important;
+        box-shadow:
+            -8px -4px 8px 0px #ffffff,
+            8px 4px 12px 0px #d1d9e6,
+            4px 4px 4px 0px #d1d9e6 inset,
+            -4px -4px 4px 0px #ffffff inset !important;
+        overflow: hidden !important;
+    }
+    [data-testid="stToggle"] button[role="switch"] > * {
+        opacity: 0 !important;
+    }
+    [data-testid="stToggle"] button[role="switch"]::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: -45%;
+        width: 200%;
+        height: 100%;
+        background: #ecf0f3;
+        border-radius: 15px;
+        transform: translate3d(-30%, 0, 0);
+        transition: transform 0.4s cubic-bezier(0.85, 0.05, 0.18, 1.35);
+        box-shadow: -8px -4px 8px 0px #ffffff, 8px 4px 12px 0px #d1d9e6;
+    }
+    [data-testid="stToggle"] button[role="switch"][aria-checked="true"]::before {
+        transform: translate3d(18%, 0, 0);
+        background: #3e7cb1;
     }
     .typewriter-text {
         display: inline-block;
@@ -725,6 +830,35 @@ def inject_mobile_and_print_css() -> None:
         92% { opacity: 1; }
         to { left: 118%; opacity: 0; }
     }
+    @keyframes loader_5191 {
+        from { opacity: 0.22; }
+        to { opacity: 1; }
+    }
+    .brief-loader-wrap {
+        position: relative;
+        width: 28px;
+        height: 28px;
+        margin: 0.15rem auto 0.35rem auto;
+    }
+    .brief-loader-wrap .square {
+        width: 5px;
+        height: 5px;
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        margin-top: -2.5px;
+        margin-left: -2.5px;
+        background: #3e7cb1;
+    }
+    .brief-loader-wrap .sq1 { margin-top: -12.5px; margin-left: -12.5px; animation: loader_5191 675ms ease-in-out 0ms infinite alternate; }
+    .brief-loader-wrap .sq2 { margin-top: -12.5px; animation: loader_5191 675ms ease-in-out 75ms infinite alternate; }
+    .brief-loader-wrap .sq3 { margin-top: -12.5px; margin-left: 7.5px; animation: loader_5191 675ms ease-in-out 150ms infinite alternate; }
+    .brief-loader-wrap .sq4 { margin-left: -12.5px; animation: loader_5191 675ms ease-in-out 225ms infinite alternate; }
+    .brief-loader-wrap .sq5 { animation: loader_5191 675ms ease-in-out 300ms infinite alternate; }
+    .brief-loader-wrap .sq6 { margin-left: 7.5px; animation: loader_5191 675ms ease-in-out 375ms infinite alternate; }
+    .brief-loader-wrap .sq7 { margin-top: 7.5px; margin-left: -12.5px; animation: loader_5191 675ms ease-in-out 450ms infinite alternate; }
+    .brief-loader-wrap .sq8 { margin-top: 7.5px; animation: loader_5191 675ms ease-in-out 525ms infinite alternate; }
+    .brief-loader-wrap .sq9 { margin-top: 7.5px; margin-left: 7.5px; animation: loader_5191 675ms ease-in-out 600ms infinite alternate; }
     @keyframes statusPulse {
         0%, 100% { transform: scale(0.9); opacity: 0.45; background: #A9BCE3; }
         50% { transform: scale(1.15); opacity: 1; background: #3e7cb1; }
@@ -747,6 +881,53 @@ def inject_mobile_and_print_css() -> None:
         }
     }
 
+    /* FINAL toggle override: direct switch-button rendering */
+    [data-testid="stToggle"] button[role="switch"] {
+        position: relative !important;
+        width: 60px !important;
+        min-width: 60px !important;
+        height: 30px !important;
+        border-radius: 15px !important;
+        border: none !important;
+        background: #ecf0f3 !important;
+        box-shadow:
+            -8px -4px 8px 0 #ffffff,
+            8px 4px 12px 0 #d1d9e6,
+            4px 4px 4px 0 #d1d9e6 inset,
+            -4px -4px 4px 0 #ffffff inset !important;
+        overflow: hidden !important;
+        padding: 0 !important;
+    }
+    [data-testid="stToggle"] button[role="switch"] > * {
+        display: none !important;
+    }
+    [data-testid="stToggle"] button[role="switch"]::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: 15px;
+        background: #ecf0f3;
+    }
+    [data-testid="stToggle"] button[role="switch"]::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 26px;
+        height: 26px;
+        border-radius: 13px;
+        background: #054a91;
+        box-shadow: inset 0 0 0.12em #dbe4ee;
+        transition: left 0.28s cubic-bezier(0.85, 0.05, 0.18, 1.35) !important;
+    }
+    [data-testid="stToggle"] button[role="switch"][aria-checked="true"]::before {
+        background: #3e7cb1;
+    }
+    [data-testid="stToggle"] button[role="switch"][aria-checked="true"]::after {
+        left: 32px;
+        background: #f17300;
+    }
+
     @media print {
         button, input, textarea, select, [data-testid="stSidebar"], [data-testid="stToolbar"], header, footer, .stAlert, .stSpinner, [data-testid="stFeedback"] {
             display: none !important;
@@ -756,7 +937,7 @@ def inject_mobile_and_print_css() -> None:
         @page { size: A4; margin: 0.5in; }
     }
 
-    @media (max-width: 800px) {
+    @media (max-width: 920px) {
         .shift-hero {
             grid-template-columns: 1fr;
         }
@@ -826,7 +1007,7 @@ def inject_print_preview_css() -> None:
             display: none !important;
         }
         .block-container {
-            max-width: 800px !important;
+            max-width: 920px !important;
             border-color: #D1D7E2 !important;
             background: #FFFFFF !important;
         }
@@ -864,13 +1045,19 @@ def inject_dark_mode_css() -> None:
             --dm-7: #2dfa7c;
         }
         html, body, [data-testid="stAppViewContainer"] {
-            background: linear-gradient(180deg, var(--dm-1), var(--dm-2)) !important;
+            background: transparent !important;
             color: #EFFFF6 !important;
         }
+        .lineart-stage {
+            display: none !important;
+        }
         .block-container {
-            background: linear-gradient(180deg, rgba(2, 9, 105, 0.82), rgba(9, 49, 108, 0.84)) !important;
+            background: linear-gradient(180deg, #020969, #09316c) !important;
             border-color: rgba(38, 210, 121, 0.42) !important;
             box-shadow: 0 8px 24px rgba(0, 0, 0, 0.42) !important;
+        }
+        .block-container::before {
+            background: linear-gradient(180deg, #020969, #09316c) !important;
         }
         .shift-hero {
             border-color: rgba(38, 210, 121, 0.42) !important;
@@ -891,7 +1078,7 @@ def inject_dark_mode_css() -> None:
             border-left-color: rgba(38, 210, 121, 0.45) !important;
         }
         .shift-hero-right-copy {
-            background: rgba(16, 89, 111, 0.75) !important;
+            background: #10596f !important;
             color: #EFFFF6 !important;
             border-bottom-color: rgba(38, 210, 121, 0.45) !important;
         }
@@ -900,7 +1087,7 @@ def inject_dark_mode_css() -> None:
         }
         .shift-hero-right-status .status-strip {
             border-color: rgba(38, 210, 121, 0.42) !important;
-            background: rgba(9, 49, 108, 0.62) !important;
+            background: #09316c !important;
             color: #D8FEEB !important;
         }
         .shift-hero-right-status .status-label {
@@ -943,7 +1130,7 @@ def inject_dark_mode_css() -> None:
             color: #2dfa7c !important;
         }
         .scorecard-card {
-            background: linear-gradient(180deg, rgba(9, 49, 108, 0.74), rgba(16, 89, 111, 0.62)) !important;
+            background: linear-gradient(180deg, #09316c, #10596f) !important;
             border-color: rgba(31, 170, 118, 0.55) !important;
         }
         .scorecard-axis, .scorecard-tag, .typewriter-text, .status-strip, .smart-briefs-title {
@@ -964,7 +1151,7 @@ def inject_dark_mode_css() -> None:
             border-color: #1faa76 !important;
         }
         .stTextInput > div > div > input {
-            background-color: rgba(9, 49, 108, 0.82) !important;
+            background-color: #09316c !important;
             color: #F4FFF9 !important;
             -webkit-text-fill-color: #F4FFF9 !important;
             border-color: #1faa76 !important;
@@ -975,7 +1162,7 @@ def inject_dark_mode_css() -> None:
             opacity: 1 !important;
         }
         [data-baseweb="select"] > div {
-            background: rgba(9, 49, 108, 0.88) !important;
+            background: #09316c !important;
             border-color: #1faa76 !important;
             color: #EFFFF6 !important;
         }
@@ -993,17 +1180,42 @@ def inject_dark_mode_css() -> None:
             text-transform: uppercase !important;
         }
         [data-testid="stToggle"] [role="switch"] {
-            background: #188273 !important;
-            border-color: #2dfa7c !important;
-            box-shadow: 0 0 0 1px rgba(45, 250, 124, 0.45) !important;
+            background: #09316c !important;
+            box-shadow:
+                -8px -4px 8px 0px rgba(24, 130, 115, 0.22),
+                8px 4px 12px 0px rgba(2, 9, 105, 0.75),
+                4px 4px 4px 0px rgba(2, 9, 105, 0.58) inset,
+                -4px -4px 4px 0px rgba(38, 210, 121, 0.14) inset !important;
         }
         [data-testid="stToggle"] [role="switch"][aria-checked="true"] {
-            background: #2dfa7c !important;
-            border-color: #2dfa7c !important;
+            background: #10596f !important;
         }
         [data-testid="stToggle"] [role="switch"] > div {
             background: #020969 !important;
-            border-color: #d8feeb !important;
+            border: none !important;
+            box-shadow:
+                -8px -4px 8px 0px rgba(24, 130, 115, 0.25),
+                8px 4px 12px 0px rgba(2, 9, 105, 0.72) !important;
+        }
+        [data-testid="stToggle"] [role="switch"][aria-checked="true"] > div {
+            background: #2dfa7c !important;
+        }
+        [data-testid="stToggle"] button[role="switch"] {
+            background: #09316c !important;
+            box-shadow:
+                -8px -4px 8px 0px rgba(24, 130, 115, 0.22),
+                8px 4px 12px 0px rgba(2, 9, 105, 0.75),
+                4px 4px 4px 0px rgba(2, 9, 105, 0.58) inset,
+                -4px -4px 4px 0px rgba(38, 210, 121, 0.14) inset !important;
+        }
+        [data-testid="stToggle"] button[role="switch"]::before {
+            background: #09316c !important;
+            box-shadow:
+                -8px -4px 8px 0px rgba(24, 130, 115, 0.25),
+                8px 4px 12px 0px rgba(2, 9, 105, 0.72) !important;
+        }
+        [data-testid="stToggle"] button[role="switch"][aria-checked="true"]::before {
+            background: #2dfa7c !important;
         }
         .stButton > button {
             background: linear-gradient(180deg, #1faa76, #188273) !important;
@@ -1013,6 +1225,47 @@ def inject_dark_mode_css() -> None:
         .stButton > button span,
         .stButton > button p,
         .stButton > button div {
+            color: #031C14 !important;
+            -webkit-text-fill-color: #031C14 !important;
+        }
+        /* FINAL dark-mode override for custom toggle shape */
+        [data-testid="stToggle"] button[role="switch"] {
+            background: #09316c !important;
+            box-shadow:
+                -8px -4px 8px 0 rgba(24, 130, 115, 0.22),
+                8px 4px 12px 0 rgba(2, 9, 105, 0.75),
+                4px 4px 4px 0 rgba(2, 9, 105, 0.58) inset,
+                -4px -4px 4px 0 rgba(38, 210, 121, 0.14) inset !important;
+        }
+        [data-testid="stToggle"] button[role="switch"]::before {
+            background: #09316c !important;
+        }
+        [data-testid="stToggle"] button[role="switch"]::after {
+            background: #020969 !important;
+            box-shadow: inset 0 0 0.12em #d8feeb !important;
+        }
+        [data-testid="stToggle"] button[role="switch"][aria-checked="true"]::before {
+            background: #188273 !important;
+        }
+        [data-testid="stToggle"] button[role="switch"][aria-checked="true"]::after {
+            background: #2dfa7c !important;
+        }
+        .stDownloadButton > button,
+        .stDownloadButton > button span,
+        .stDownloadButton > button p,
+        .stDownloadButton > button div {
+            color: #031C14 !important;
+            -webkit-text-fill-color: #031C14 !important;
+        }
+        .stDownloadButton > button {
+            background: linear-gradient(180deg, #1faa76, #188273) !important;
+            border: 1px solid #26d279 !important;
+        }
+        .stDownloadButton > button:hover,
+        .stDownloadButton > button:active,
+        .stDownloadButton > button:focus {
+            background: linear-gradient(180deg, #26d279, #1faa76) !important;
+            border-color: #2dfa7c !important;
             color: #031C14 !important;
             -webkit-text-fill-color: #031C14 !important;
         }
@@ -1410,7 +1663,7 @@ def render_header() -> tuple[str, bool]:
             key="reliability_mode",
             label_visibility="collapsed",
         )
-        reliability_mode = st.session_state.get("reliability_mode", "Strict")
+        reliability_mode = st.session_state.get("reliability_mode", "Balanced")
         badge_class = "strict" if reliability_mode == "Strict" else "balanced"
         st.markdown(
             f"""
@@ -1694,6 +1947,7 @@ def render_source_quality_panel() -> None:
     if not ev:
         return
     with st.expander("Source Quality Panel", expanded=False):
+        thresholds = ev.get("thresholds", {}) or {}
         st.markdown(
             f"- Score: `{ev.get('score', 'n/a')}`\n"
             f"- Trusted sources hit: `{ev.get('trusted_hits', 'n/a')}`\n"
@@ -1701,6 +1955,13 @@ def render_source_quality_panel() -> None:
             f"- Startup relevance hits: `{ev.get('startup_relevance_hits', 'n/a')}`\n"
             f"- Enough for reliable brief: `{ev.get('enough', False)}`"
         )
+        if thresholds:
+            st.caption(
+                f"Thresholds ({thresholds.get('mode', 'n/a')}): "
+                f"trusted>={thresholds.get('min_trusted_hits', 'n/a')}, "
+                f"relevance>={thresholds.get('min_startup_relevance_hits', 'n/a')}, "
+                f"results>={thresholds.get('min_results', 'n/a')}"
+            )
         signals = ev.get("signals", {}) or {}
         st.markdown(
             f"Signals - leadership: `{signals.get('leadership', False)}`, funding: `{signals.get('funding', False)}`, "
@@ -1764,7 +2025,11 @@ def _evidence_signals(search_results: List[Dict[str, Any]]) -> Dict[str, bool]:
     }
 
 
-def evaluate_evidence_quality(startup_name: str, search_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+def evaluate_evidence_quality(
+    startup_name: str,
+    search_results: List[Dict[str, Any]],
+    reliability_mode: str = "Balanced",
+) -> Dict[str, Any]:
     """
     Strict pre-LLM quality gate: block generation when public signal is too weak.
     """
@@ -1781,9 +2046,11 @@ def evaluate_evidence_quality(startup_name: str, search_results: List[Dict[str, 
     ]
     startup_tokens = [t for t in re.split(r"[^a-z0-9]+", startup_name.lower()) if len(t) >= 3]
 
-    # Quality thresholds (user-requested strict settings)
-    min_trusted_hits = 5
-    min_startup_relevance_hits = 20
+    # Adaptive thresholds: strict enough for quality, but not so strict that most queries fail.
+    is_balanced = reliability_mode.lower() == "balanced"
+    min_trusted_hits = 1 if is_balanced else 2
+    min_startup_relevance_hits = 3 if is_balanced else 6
+    min_results = 6 if is_balanced else 10
     sample_limit = min(len(search_results), 50)
 
     unique_domains = set()
@@ -1807,10 +2074,10 @@ def evaluate_evidence_quality(startup_name: str, search_results: List[Dict[str, 
     score = 0
     reasons: List[str] = []
 
-    if len(search_results) >= 15:
+    if len(search_results) >= min_results:
         score += 2
     else:
-        reasons.append("fewer than 15 search results")
+        reasons.append(f"fewer than {min_results} search results")
 
     if len(unique_domains) >= 4:
         score += 2
@@ -1860,6 +2127,12 @@ def evaluate_evidence_quality(startup_name: str, search_results: List[Dict[str, 
         "signals": signals,
         "reasons": reasons[:4],
         "top_domains": sorted(domain_counts.items(), key=lambda x: x[1], reverse=True)[:6],
+        "thresholds": {
+            "min_trusted_hits": min_trusted_hits,
+            "min_startup_relevance_hits": min_startup_relevance_hits,
+            "min_results": min_results,
+            "mode": reliability_mode,
+        },
     }
 
 
@@ -1963,6 +2236,83 @@ def generate_consistent_brief(startup_name: str, search_results: List[Dict[str, 
     return second if score_second >= score_first else first
 
 
+def generate_best_of_multiple_attempts(
+    startup_name: str,
+    reliability_mode: str,
+    attempts: int = 3,
+) -> Dict[str, Any]:
+    """
+    Run multiple search + generation attempts and return the best candidate.
+    This reduces one-click variance when public search results fluctuate.
+    """
+    best_candidate: Dict[str, Any] | None = None
+    best_rank = -10_000
+    no_signal_attempts = 0
+    attempt_errors: List[str] = []
+    best_evidence_seen: Dict[str, Any] | None = None
+
+    for _ in range(max(1, attempts)):
+        try:
+            results = search_duckduckgo(startup_name, max_results=30)
+        except Exception as e:
+            attempt_errors.append(str(e))
+            continue
+
+        if not results:
+            no_signal_attempts += 1
+            continue
+
+        evidence = evaluate_evidence_quality(
+            startup_name,
+            results,
+            reliability_mode=reliability_mode,
+        )
+
+        if (
+            best_evidence_seen is None
+            or evidence.get("score", 0) > best_evidence_seen.get("score", 0)
+        ):
+            best_evidence_seen = evidence
+
+        # In strict mode, skip weak evidence attempts and keep trying.
+        if reliability_mode == "Strict" and not evidence.get("enough", False):
+            continue
+
+        try:
+            brief = generate_consistent_brief(startup_name, results)
+        except Exception as e:
+            attempt_errors.append(str(e))
+            continue
+
+        brief_score, _ = _brief_quality_score(brief, evidence.get("signals", {}) or {})
+        evidence_score = int(evidence.get("score", 0))
+        rank = (evidence_score * 3) + (brief_score * 2)
+
+        candidate = {
+            "brief_markdown": brief,
+            "search_results": results,
+            "evidence_quality": evidence,
+            "low_confidence": not evidence.get("enough", False),
+            "rank": rank,
+            "brief_score": brief_score,
+        }
+
+        if rank > best_rank:
+            best_rank = rank
+            best_candidate = candidate
+
+        # Early stop if this run is already very strong.
+        if evidence.get("enough", False) and brief_score >= 16:
+            break
+
+    return {
+        "best_candidate": best_candidate,
+        "no_signal_attempts": no_signal_attempts,
+        "attempt_errors": attempt_errors,
+        "best_evidence_seen": best_evidence_seen,
+    }
+
+
 def render_scorecard_cards(cards: List[Dict[str, str]]) -> None:
     if not cards:
         return
@@ -2007,6 +2357,25 @@ def render_feedback() -> None:
         except Exception:
             pass
         st.toast("Thanks — feedback saved.")
+
+
+def render_generation_loader(target) -> None:
+    target.markdown(
+        """
+        <div class="brief-loader-wrap" aria-label="Generating brief">
+            <div class="square sq1"></div>
+            <div class="square sq2"></div>
+            <div class="square sq3"></div>
+            <div class="square sq4"></div>
+            <div class="square sq5"></div>
+            <div class="square sq6"></div>
+            <div class="square sq7"></div>
+            <div class="square sq8"></div>
+            <div class="square sq9"></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_brief(brief_markdown: str, sources: List[Dict[str, Any]]) -> None:
@@ -2081,7 +2450,7 @@ def init_session_state() -> None:
         "error": None,
         "feedback_submitted": False,
         "motion_mode": "Subtle",
-        "reliability_mode": "Strict",
+        "reliability_mode": "Balanced",
         "low_confidence": False,
         "evidence_quality": None,
         "brief_history": [],
@@ -2117,41 +2486,57 @@ def main() -> None:
             st.session_state["low_confidence"] = False
             st.session_state["evidence_quality"] = None
 
+            loader_placeholder = st.empty()
+            render_generation_loader(loader_placeholder)
             with st.status("Initializing scan...", expanded=True) as status:
                 try:
-                    status.update(label="Scanning public signals...", state="running")
-                    results = search_duckduckgo(query, max_results=30)
-                    if not results:
-                        status.update(label="No public signal found.", state="error")
-                        st.warning("No public signal found. The company might be in stealth. Try adding an exact URL.")
-                        return
-                    if len(results) < 4:
-                        st.info("Limited public signal found; brief quality may be lower. Try adding exact website URL.")
-                    st.session_state["search_results"] = results
+                    reliability_mode = st.session_state.get("reliability_mode", "Balanced")
+                    status.update(label="Searching public signals and drafting brief...", state="running")
+                    run = generate_best_of_multiple_attempts(
+                        startup_name=query,
+                        reliability_mode=reliability_mode,
+                        attempts=3,
+                    )
+                    best_candidate = run.get("best_candidate")
+                    best_evidence_seen = run.get("best_evidence_seen")
 
-                    status.update(label="Validating source quality...", state="running")
-                    evidence = evaluate_evidence_quality(query, results)
-                    st.session_state["evidence_quality"] = evidence
-                    reliability_mode = st.session_state.get("reliability_mode", "Strict")
-                    if not evidence["enough"]:
-                        if reliability_mode == "Strict":
+                    if not best_candidate:
+                        if run.get("no_signal_attempts", 0) >= 3:
+                            status.update(label="No public signal found.", state="error")
+                            st.warning("No public signal found. The company might be in stealth. Try adding an exact URL.")
+                            return
+
+                        if reliability_mode == "Strict" and best_evidence_seen and not best_evidence_seen.get("enough", False):
+                            st.session_state["evidence_quality"] = best_evidence_seen
                             status.update(label="Insufficient high-quality public signal.", state="error")
                             st.warning(
                                 "Signal quality is too weak for a reliable brief. "
                                 "Add the exact company URL, country, or legal entity name and retry."
                             )
                             st.info(
-                                f"Quality score: {evidence['score']} | Trusted sources: {evidence['trusted_hits']} | "
-                                f"Unique domains: {evidence['unique_domains']} | "
-                                f"Startup relevance hits: {evidence['startup_relevance_hits']}"
+                                f"Quality score: {best_evidence_seen['score']} | Trusted sources: {best_evidence_seen['trusted_hits']} | "
+                                f"Unique domains: {best_evidence_seen['unique_domains']} | "
+                                f"Startup relevance hits: {best_evidence_seen['startup_relevance_hits']}"
                             )
-                            if evidence.get("reasons"):
-                                st.caption("Weak areas: " + "; ".join(evidence["reasons"]))
+                            if best_evidence_seen.get("reasons"):
+                                st.caption("Weak areas: " + "; ".join(best_evidence_seen["reasons"]))
                             return
-                        st.session_state["low_confidence"] = True
 
-                    status.update(label="Drafting investment brief...", state="running")
-                    st.session_state["brief_markdown"] = generate_consistent_brief(query, results)
+                        status.update(label="Unable to generate a stable brief.", state="error")
+                        details = run.get("attempt_errors", [])
+                        if details:
+                            st.caption("Attempt diagnostics: " + " | ".join(details[:2]))
+                        st.warning("Could not generate a reliable brief this run. Please retry with an exact company URL.")
+                        return
+
+                    st.session_state["brief_markdown"] = best_candidate["brief_markdown"]
+                    st.session_state["search_results"] = best_candidate["search_results"]
+                    st.session_state["evidence_quality"] = best_candidate["evidence_quality"]
+                    st.session_state["low_confidence"] = bool(best_candidate["low_confidence"])
+
+                    if len(best_candidate["search_results"]) < 4:
+                        st.info("Limited public signal found; brief quality may be lower. Try adding exact website URL.")
+
                     history = st.session_state.get("brief_history", [])
                     history.insert(
                         0,
@@ -2159,7 +2544,7 @@ def main() -> None:
                             "query": query,
                             "timestamp": datetime.datetime.now(ZoneInfo("Europe/Zurich")).strftime("%Y-%m-%d %H:%M"),
                             "brief_markdown": st.session_state["brief_markdown"],
-                            "search_results": results,
+                            "search_results": st.session_state["search_results"],
                             "low_confidence": st.session_state.get("low_confidence", False),
                             "evidence_quality": st.session_state.get("evidence_quality"),
                         },
@@ -2169,6 +2554,8 @@ def main() -> None:
                 except Exception as e:
                     st.session_state["error"] = str(e)
                     status.update(label="Error while generating dossier.", state="error")
+                finally:
+                    loader_placeholder.empty()
 
     if st.session_state.get("error"):
         st.error(
