@@ -3,6 +3,9 @@ import datetime
 import json
 import re
 import time
+import platform
+import sys
+import importlib.metadata
 from html import escape
 from pathlib import Path
 from typing import List, Dict, Any
@@ -2379,23 +2382,44 @@ def generate_best_of_multiple_attempts(
     no_signal_attempts = 0
     attempt_errors: List[str] = []
     best_evidence_seen: Dict[str, Any] | None = None
+    attempt_stats: List[Dict[str, Any]] = []
 
-    for _ in range(max(1, attempts)):
+    for idx in range(max(1, attempts)):
+        attempt_info: Dict[str, Any] = {
+            "attempt": idx + 1,
+            "results": 0,
+            "evidence_score": None,
+            "trusted_hits": None,
+            "startup_relevance_hits": None,
+            "enough": None,
+            "status": "started",
+            "error": None,
+        }
         try:
             results = search_duckduckgo(startup_name, max_results=30, preferred_url=preferred_url)
         except Exception as e:
             attempt_errors.append(str(e))
+            attempt_info["status"] = "search_error"
+            attempt_info["error"] = str(e)
+            attempt_stats.append(attempt_info)
             continue
 
         if not results:
             no_signal_attempts += 1
+            attempt_info["status"] = "no_signal"
+            attempt_stats.append(attempt_info)
             continue
 
+        attempt_info["results"] = len(results)
         evidence = evaluate_evidence_quality(
             startup_name,
             results,
             reliability_mode=reliability_mode,
         )
+        attempt_info["evidence_score"] = evidence.get("score")
+        attempt_info["trusted_hits"] = evidence.get("trusted_hits")
+        attempt_info["startup_relevance_hits"] = evidence.get("startup_relevance_hits")
+        attempt_info["enough"] = evidence.get("enough")
 
         if (
             best_evidence_seen is None
@@ -2405,16 +2429,23 @@ def generate_best_of_multiple_attempts(
 
         # Hard floor: do not draft briefs when zero startup-name relevance is detected.
         if evidence.get("startup_relevance_hits", 0) == 0:
+            attempt_info["status"] = "filtered_zero_relevance"
+            attempt_stats.append(attempt_info)
             continue
 
         # In strict mode, skip weak evidence attempts and keep trying.
         if reliability_mode == "Strict" and not evidence.get("enough", False):
+            attempt_info["status"] = "filtered_strict_weak_evidence"
+            attempt_stats.append(attempt_info)
             continue
 
         try:
             brief = generate_consistent_brief(startup_name, results)
         except Exception as e:
             attempt_errors.append(str(e))
+            attempt_info["status"] = "generation_error"
+            attempt_info["error"] = str(e)
+            attempt_stats.append(attempt_info)
             continue
 
         brief_score, _ = _brief_quality_score(brief, evidence.get("signals", {}) or {})
@@ -2429,6 +2460,10 @@ def generate_best_of_multiple_attempts(
             "rank": rank,
             "brief_score": brief_score,
         }
+        attempt_info["status"] = "candidate"
+        attempt_info["brief_score"] = brief_score
+        attempt_info["rank"] = rank
+        attempt_stats.append(attempt_info)
 
         if rank > best_rank:
             best_rank = rank
@@ -2443,6 +2478,7 @@ def generate_best_of_multiple_attempts(
         "no_signal_attempts": no_signal_attempts,
         "attempt_errors": attempt_errors,
         "best_evidence_seen": best_evidence_seen,
+        "attempt_stats": attempt_stats,
     }
 
 
@@ -2459,6 +2495,54 @@ def estimate_generation_window_seconds() -> tuple[int, int]:
     low = max(15, int(avg * 0.75))
     high = max(low + 12, int(avg * 1.35))
     return low, high
+
+
+def _safe_pkg_version(pkg: str) -> str:
+    try:
+        return importlib.metadata.version(pkg)
+    except Exception:
+        return "unknown"
+
+
+def render_deployment_diagnostics() -> None:
+    with st.expander("Deployment Diagnostics", expanded=False):
+        st.markdown(
+            f"- Python: `{sys.version.split()[0]}`\n"
+            f"- OS: `{platform.system()} {platform.release()}`\n"
+            f"- Streamlit: `{_safe_pkg_version('streamlit')}`\n"
+            f"- duckduckgo-search: `{_safe_pkg_version('duckduckgo-search')}`\n"
+            f"- openai: `{_safe_pkg_version('openai')}`"
+        )
+        model_name = get_config_value("LLM_MODEL_NAME", "meta-llama/Meta-Llama-3-70B-Instruct")
+        base_url = get_config_value("OPENAI_BASE_URL", "https://api.deepinfra.com/v1/openai")
+        api_key_present = bool(get_config_value("OPENAI_API_KEY") or get_config_value("DEEPINFRA_API_KEY"))
+        st.markdown(
+            f"- Model: `{model_name}`\n"
+            f"- Base URL: `{base_url}`\n"
+            f"- API key present: `{api_key_present}`"
+        )
+
+        parsed_name = st.session_state.get("last_parsed_startup_name")
+        parsed_url = st.session_state.get("last_preferred_url")
+        if parsed_name or parsed_url:
+            st.markdown(
+                f"- Parsed startup name: `{parsed_name or 'n/a'}`\n"
+                f"- Preferred URL: `{parsed_url or 'none'}`"
+            )
+
+        last_diag = st.session_state.get("last_run_diagnostics") or {}
+        attempts = last_diag.get("attempt_stats") or []
+        if attempts:
+            st.markdown("Recent run attempts:")
+            for a in attempts:
+                st.markdown(
+                    f"- Attempt `{a.get('attempt')}` | status: `{a.get('status')}` | "
+                    f"results: `{a.get('results')}` | evidence: `{a.get('evidence_score')}` | "
+                    f"trusted: `{a.get('trusted_hits')}` | relevance: `{a.get('startup_relevance_hits')}`"
+                )
+        errs = last_diag.get("attempt_errors") or []
+        if errs:
+            st.caption("Recent attempt errors: " + " | ".join(errs[:2]))
 
 
 def render_scorecard_cards(cards: List[Dict[str, str]]) -> None:
@@ -2605,6 +2689,9 @@ def init_session_state() -> None:
         "history_select_idx": 0,
         "print_preview_mode": False,
         "generation_durations": [],
+        "last_run_diagnostics": None,
+        "last_parsed_startup_name": None,
+        "last_preferred_url": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -2631,6 +2718,8 @@ def main() -> None:
             if not startup_name:
                 st.warning("Please enter a startup name (and optional URL) first.")
                 return
+            st.session_state["last_parsed_startup_name"] = startup_name
+            st.session_state["last_preferred_url"] = preferred_url
 
             st.session_state["brief_markdown"] = None
             st.session_state["search_results"] = []
@@ -2656,6 +2745,7 @@ def main() -> None:
                         attempts=3,
                         preferred_url=preferred_url,
                     )
+                    st.session_state["last_run_diagnostics"] = run
                     best_candidate = run.get("best_candidate")
                     best_evidence_seen = run.get("best_evidence_seen")
 
@@ -2738,6 +2828,8 @@ def main() -> None:
 
     if st.session_state.get("brief_markdown"):
         render_brief(st.session_state["brief_markdown"], st.session_state.get("search_results", []))
+
+    render_deployment_diagnostics()
 
 
 if __name__ == "__main__":
