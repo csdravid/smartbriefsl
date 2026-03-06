@@ -1489,6 +1489,7 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                             "body": (r.get("body") or r.get("snippet") or "").strip(),
                             "href": href,
                             "name_match": name_match,
+                            "synthetic": False,
                         }
                     )
             except Exception:
@@ -1521,6 +1522,7 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                                 "body": (r.get("body") or r.get("snippet") or "").strip(),
                                 "href": href,
                                 "name_match": name_match,
+                                "synthetic": False,
                             }
                         )
                 except Exception:
@@ -1582,6 +1584,7 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                     "body": "User-provided startup website.",
                     "href": preferred_url,
                     "name_match": True,
+                    "synthetic": True,
                 },
             )
 
@@ -2385,9 +2388,15 @@ def generate_best_of_multiple_attempts(
     attempt_stats: List[Dict[str, Any]] = []
 
     for idx in range(max(1, attempts)):
+        # Backoff between attempts helps on hosted environments where
+        # search providers may temporarily throttle repeated requests.
+        if idx > 0:
+            time.sleep(min(2.5, 0.85 * idx))
+
         attempt_info: Dict[str, Any] = {
             "attempt": idx + 1,
             "results": 0,
+            "real_results": 0,
             "evidence_score": None,
             "trusted_hits": None,
             "startup_relevance_hits": None,
@@ -2410,10 +2419,20 @@ def generate_best_of_multiple_attempts(
             attempt_stats.append(attempt_info)
             continue
 
+        real_results = [r for r in results if not r.get("synthetic", False)]
         attempt_info["results"] = len(results)
+        attempt_info["real_results"] = len(real_results)
+
+        # If only synthetic/pinned URL exists, treat as a blocked/empty search attempt.
+        if len(real_results) == 0:
+            no_signal_attempts += 1
+            attempt_info["status"] = "search_blocked_or_empty"
+            attempt_stats.append(attempt_info)
+            continue
+
         evidence = evaluate_evidence_quality(
             startup_name,
-            results,
+            real_results,
             reliability_mode=reliability_mode,
         )
         attempt_info["evidence_score"] = evidence.get("score")
@@ -2430,6 +2449,12 @@ def generate_best_of_multiple_attempts(
         # Hard floor: do not draft briefs when zero startup-name relevance is detected.
         if evidence.get("startup_relevance_hits", 0) == 0:
             attempt_info["status"] = "filtered_zero_relevance"
+            attempt_stats.append(attempt_info)
+            continue
+
+        # Hard floor: if search returned very few real hits, skip drafting.
+        if len(real_results) < 3:
+            attempt_info["status"] = "filtered_too_few_real_results"
             attempt_stats.append(attempt_info)
             continue
 
@@ -2537,7 +2562,7 @@ def render_deployment_diagnostics() -> None:
             for a in attempts:
                 st.markdown(
                     f"- Attempt `{a.get('attempt')}` | status: `{a.get('status')}` | "
-                    f"results: `{a.get('results')}` | evidence: `{a.get('evidence_score')}` | "
+                    f"results: `{a.get('real_results', a.get('results'))}` real / `{a.get('results')}` total | evidence: `{a.get('evidence_score')}` | "
                     f"trusted: `{a.get('trusted_hits')}` | relevance: `{a.get('startup_relevance_hits')}`"
                 )
         errs = last_diag.get("attempt_errors") or []
@@ -2752,7 +2777,19 @@ def main() -> None:
                     if not best_candidate:
                         if run.get("no_signal_attempts", 0) >= 3:
                             status.update(label="No public signal found.", state="error")
-                            st.warning("No public signal found. The company might be in stealth. Try adding an exact URL.")
+                            attempt_stats = run.get("attempt_stats") or []
+                            blocked_like = sum(
+                                1 for a in attempt_stats if a.get("status") in {"search_blocked_or_empty", "no_signal"}
+                            )
+                            if blocked_like >= 2:
+                                st.warning(
+                                    "Search provider returned too few results on this deployment run. "
+                                    "Please retry in ~30-60s or add more specific keywords (country/category)."
+                                )
+                            else:
+                                st.warning(
+                                    "No public signal found. The company might be in stealth. Try adding an exact URL."
+                                )
                             return
 
                         if best_evidence_seen and best_evidence_seen.get("startup_relevance_hits", 0) == 0:
