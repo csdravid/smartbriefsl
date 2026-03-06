@@ -2,6 +2,7 @@ import os
 import datetime
 import json
 import re
+import time
 from html import escape
 from pathlib import Path
 from typing import List, Dict, Any
@@ -1296,7 +1297,73 @@ def inject_dark_mode_css() -> None:
 # Search & LLM Utilities
 # -----------------------------
 
-def search_duckduckgo(query: str, max_results: int = 30) -> List[Dict[str, Any]]:
+def normalize_url_candidate(raw_url: str) -> str | None:
+    token = (raw_url or "").strip().strip("()[]<>{},;\"'")
+    if not token:
+        return None
+    if not re.match(r"^https?://", token, flags=re.IGNORECASE):
+        token = f"https://{token}"
+    try:
+        parsed = urlparse(token)
+        if not parsed.netloc or "." not in parsed.netloc:
+            return None
+        clean_netloc = parsed.netloc.lower()
+        clean_path = parsed.path or ""
+        normalized = f"{parsed.scheme.lower()}://{clean_netloc}{clean_path}"
+        return normalized.rstrip("/")
+    except Exception:
+        return None
+
+
+def infer_startup_name_from_domain(domain: str) -> str:
+    host = (domain or "").lower().strip()
+    if host.startswith("www."):
+        host = host[4:]
+    parts = [p for p in host.split(".") if p]
+    if not parts:
+        return "Startup"
+
+    # Handle common multi-part public suffixes (e.g., co.uk).
+    if len(parts) >= 3 and parts[-2] in {"co", "com", "org", "net", "gov", "ac"} and len(parts[-1]) <= 3:
+        root = parts[-3]
+    elif len(parts) >= 2:
+        root = parts[-2]
+    else:
+        root = parts[0]
+    name = re.sub(r"[^a-z0-9]+", " ", root).strip()
+    return name.title() if name else "Startup"
+
+
+def parse_startup_input(user_input: str) -> tuple[str, str | None]:
+    raw = (user_input or "").strip()
+    if not raw:
+        return "", None
+
+    url_match = re.search(
+        r"((?:https?://)?(?:www\.)?[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?:/[^\s]*)?)",
+        raw,
+    )
+    if not url_match:
+        return raw, None
+
+    raw_url = url_match.group(1)
+    normalized_url = normalize_url_candidate(raw_url)
+    if not normalized_url:
+        return raw, None
+
+    parsed = urlparse(normalized_url)
+    inferred_name = infer_startup_name_from_domain(parsed.netloc)
+
+    # If user typed both name and URL, prefer explicit name.
+    name_without_url = raw.replace(raw_url, " ")
+    name_without_url = re.sub(r"[\|\-,;/]+", " ", name_without_url)
+    name_without_url = re.sub(r"\s+", " ", name_without_url).strip()
+    if any(ch.isalpha() for ch in name_without_url) and len(name_without_url) >= 2:
+        return name_without_url, normalized_url
+    return inferred_name, normalized_url
+
+
+def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | None = None) -> List[Dict[str, Any]]:
     legal_suffixes = {
         "sa", "ag", "inc", "llc", "ltd", "gmbh", "sarl", "bv", "nv", "oy", "ab", "spa", "plc", "corp", "co"
     }
@@ -1329,6 +1396,11 @@ def search_duckduckgo(query: str, max_results: int = 30) -> List[Dict[str, Any]]
     if not startup_tokens:
         startup_tokens = [t for t in re.split(r"[^a-z0-9]+", query_clean.lower()) if len(t) >= 3]
 
+    preferred_domain = ""
+    if preferred_url:
+        parsed_preferred = urlparse(preferred_url)
+        preferred_domain = parsed_preferred.netloc.lower().replace("www.", "")
+
     blocked_nsfw_terms = [
         "porn", "porno", "xxx", "adult", "sex", "xvideos", "xnxx", "pornhub", "redtube",
         "youporn", "brazzers", "onlyfans", "escort", "cams", "camgirl",
@@ -1346,6 +1418,13 @@ def search_duckduckgo(query: str, max_results: int = 30) -> List[Dict[str, Any]]
         f"site:startupticker.ch \"{core_query}\"",
         f"site:venturelab.swiss \"{core_query}\"",
     ]
+    if preferred_domain:
+        enriched_queries.extend(
+            [
+                f"site:{preferred_domain} {core_query}",
+                f"\"{preferred_domain}\" {core_query} startup",
+            ]
+        )
 
     cleaned_results: List[Dict[str, Any]] = []
     seen_urls = set()
@@ -1471,6 +1550,10 @@ def search_duckduckgo(query: str, max_results: int = 30) -> List[Dict[str, Any]]
             score += 3
         if r.get("name_match"):
             score += 12
+        if preferred_domain and preferred_domain in domain:
+            score += 20
+        if preferred_url and href.rstrip("/") == preferred_url.rstrip("/").lower():
+            score += 30
 
         # Penalize low-signal utility pages.
         if any(skip in href for skip in ["login", "signup", "privacy", "terms"]):
@@ -1483,6 +1566,21 @@ def search_duckduckgo(query: str, max_results: int = 30) -> List[Dict[str, Any]]
     name_matched = [r for r in cleaned_results if r.get("name_match")]
     if len(name_matched) >= 3:
         cleaned_results = name_matched + [r for r in cleaned_results if not r.get("name_match")]
+
+    # Ensure user-provided URL is represented in sources.
+    if preferred_url:
+        preferred_norm = preferred_url.rstrip("/").lower()
+        has_preferred = any((r.get("href", "").rstrip("/").lower() == preferred_norm) for r in cleaned_results)
+        if not has_preferred:
+            cleaned_results.insert(
+                0,
+                {
+                    "title": f"Official website ({preferred_domain or 'provided URL'})",
+                    "body": "User-provided startup website.",
+                    "href": preferred_url,
+                    "name_match": True,
+                },
+            )
 
     # If everything failed, surface meaningful diagnostics instead of silent "no signal."
     if not cleaned_results and search_errors:
@@ -2270,6 +2368,7 @@ def generate_best_of_multiple_attempts(
     startup_name: str,
     reliability_mode: str,
     attempts: int = 3,
+    preferred_url: str | None = None,
 ) -> Dict[str, Any]:
     """
     Run multiple search + generation attempts and return the best candidate.
@@ -2283,7 +2382,7 @@ def generate_best_of_multiple_attempts(
 
     for _ in range(max(1, attempts)):
         try:
-            results = search_duckduckgo(startup_name, max_results=30)
+            results = search_duckduckgo(startup_name, max_results=30, preferred_url=preferred_url)
         except Exception as e:
             attempt_errors.append(str(e))
             continue
@@ -2345,6 +2444,21 @@ def generate_best_of_multiple_attempts(
         "attempt_errors": attempt_errors,
         "best_evidence_seen": best_evidence_seen,
     }
+
+
+def estimate_generation_window_seconds() -> tuple[int, int]:
+    """
+    Estimate generation time using recent successful runs.
+    Falls back to a conservative default window.
+    """
+    durations = st.session_state.get("generation_durations", []) or []
+    valid = [int(d) for d in durations if isinstance(d, (int, float)) and d > 0]
+    if not valid:
+        return 35, 75
+    avg = sum(valid) / max(1, len(valid))
+    low = max(15, int(avg * 0.75))
+    high = max(low + 12, int(avg * 1.35))
+    return low, high
 
 
 def render_scorecard_cards(cards: List[Dict[str, str]]) -> None:
@@ -2490,6 +2604,7 @@ def init_session_state() -> None:
         "brief_history": [],
         "history_select_idx": 0,
         "print_preview_mode": False,
+        "generation_durations": [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -2512,24 +2627,34 @@ def main() -> None:
         if not query:
             st.warning("Please enter a startup name (and optional URL) first.")
         else:
+            startup_name, preferred_url = parse_startup_input(query)
+            if not startup_name:
+                st.warning("Please enter a startup name (and optional URL) first.")
+                return
+
             st.session_state["brief_markdown"] = None
             st.session_state["search_results"] = []
             st.session_state["error"] = None
-            st.session_state["last_query"] = query
+            st.session_state["last_query"] = startup_name
             st.session_state["feedback_submitted"] = False
             st.session_state["low_confidence"] = False
             st.session_state["evidence_quality"] = None
 
             loader_placeholder = st.empty()
+            eta_placeholder = st.empty()
             render_generation_loader(loader_placeholder)
             with st.status("Initializing scan...", expanded=True) as status:
                 try:
+                    run_started = time.time()
+                    eta_low, eta_high = estimate_generation_window_seconds()
+                    eta_placeholder.caption(f"Estimated time: ~{eta_low}-{eta_high} seconds")
                     reliability_mode = st.session_state.get("reliability_mode", "Balanced")
                     status.update(label="Searching public signals and drafting brief...", state="running")
                     run = generate_best_of_multiple_attempts(
-                        startup_name=query,
+                        startup_name=startup_name,
                         reliability_mode=reliability_mode,
                         attempts=3,
+                        preferred_url=preferred_url,
                     )
                     best_candidate = run.get("best_candidate")
                     best_evidence_seen = run.get("best_evidence_seen")
@@ -2584,7 +2709,7 @@ def main() -> None:
                     history.insert(
                         0,
                         {
-                            "query": query,
+                            "query": startup_name,
                             "timestamp": datetime.datetime.now(ZoneInfo("Europe/Zurich")).strftime("%Y-%m-%d %H:%M"),
                             "brief_markdown": st.session_state["brief_markdown"],
                             "search_results": st.session_state["search_results"],
@@ -2593,12 +2718,17 @@ def main() -> None:
                         },
                     )
                     st.session_state["brief_history"] = history[:5]
-                    status.update(label="Dossier ready.", state="complete")
+                    elapsed = int(time.time() - run_started)
+                    durations = st.session_state.get("generation_durations", [])
+                    durations.append(elapsed)
+                    st.session_state["generation_durations"] = durations[-20:]
+                    status.update(label=f"Dossier ready in {elapsed}s.", state="complete")
                 except Exception as e:
                     st.session_state["error"] = str(e)
                     status.update(label="Error while generating dossier.", state="error")
                 finally:
                     loader_placeholder.empty()
+                    eta_placeholder.empty()
 
     if st.session_state.get("error"):
         st.error(
