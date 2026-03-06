@@ -2041,7 +2041,7 @@ def init_session_state() -> None:
         "error": None,
         "feedback_submitted": False,
         "motion_mode": "Subtle",
-        "reliability_mode": "Strict",
+        "reliability_mode": "Balanced",
         "low_confidence": False,
         "evidence_quality": None,
         "brief_history": [],
