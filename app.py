@@ -1077,11 +1077,13 @@ def search_duckduckgo(query: str, max_results: int = 30) -> List[Dict[str, Any]]
 
     cleaned_results: List[Dict[str, Any]] = []
     seen_urls = set()
+    search_errors: List[str] = []
 
     def fetch_with_fallback(ddgs_client: DDGS, q: str, limit: int) -> List[Dict[str, Any]]:
         """
         Try multiple DDGS backends to avoid backend-specific outages.
         """
+        backend_errors: List[str] = []
         for backend in ("lite", "html", "auto"):
             try:
                 return list(
@@ -1097,9 +1099,13 @@ def search_duckduckgo(query: str, max_results: int = 30) -> List[Dict[str, Any]]
                 try:
                     return list(ddgs_client.text(q, max_results=limit, backend=backend))
                 except Exception:
+                    backend_errors.append(f"{backend}: incompatible safesearch and fallback failed")
                     continue
             except Exception:
+                backend_errors.append(f"{backend}: request failed")
                 continue
+        if backend_errors:
+            search_errors.append(f"Query '{q}' failed across backends ({'; '.join(backend_errors)})")
         return []
 
     with DDGS() as ddgs:
@@ -1130,6 +1136,7 @@ def search_duckduckgo(query: str, max_results: int = 30) -> List[Dict[str, Any]]
                         }
                     )
             except Exception:
+                search_errors.append(f"Query loop failed: '{q}'")
                 continue
 
         # Fallback: if targeted queries are sparse/rate-limited, do a broad pass.
@@ -1159,6 +1166,7 @@ def search_duckduckgo(query: str, max_results: int = 30) -> List[Dict[str, Any]]
                             }
                         )
                 except Exception:
+                    search_errors.append(f"Fallback query loop failed: '{fq}'")
                     continue
 
     keywords = [
@@ -1192,6 +1200,16 @@ def search_duckduckgo(query: str, max_results: int = 30) -> List[Dict[str, Any]]
         return score
 
     cleaned_results.sort(key=score_result, reverse=True)
+
+    # If everything failed, surface meaningful diagnostics instead of silent "no signal."
+    if not cleaned_results and search_errors:
+        brief_errors = " | ".join(search_errors[:3])
+        raise RuntimeError(
+            "Web search failed on this deployment environment. "
+            "This is usually dependency/network/runtime related. "
+            f"Details: {brief_errors}"
+        )
+
     return cleaned_results
 
 
