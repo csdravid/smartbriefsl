@@ -1297,6 +1297,19 @@ def inject_dark_mode_css() -> None:
 # -----------------------------
 
 def search_duckduckgo(query: str, max_results: int = 30) -> List[Dict[str, Any]]:
+    legal_suffixes = {
+        "sa", "ag", "inc", "llc", "ltd", "gmbh", "sarl", "bv", "nv", "oy", "ab", "spa", "plc", "corp", "co"
+    }
+
+    query_clean = (query or "").strip()
+    core_query = re.sub(
+        r"\b(?:sa|ag|inc|llc|ltd|gmbh|sarl|bv|nv|oy|ab|spa|plc|corp|co)\b",
+        " ",
+        query_clean,
+        flags=re.IGNORECASE,
+    )
+    core_query = re.sub(r"\s+", " ", core_query).strip() or query_clean
+
     trusted_domains = [
         "startupticker.ch",
         "venturelab.swiss",
@@ -1309,23 +1322,29 @@ def search_duckduckgo(query: str, max_results: int = 30) -> List[Dict[str, Any]]
         "reuters.com",
         "bloomberg.com",
     ]
-    startup_tokens = [t for t in re.split(r"[^a-z0-9]+", query.lower()) if len(t) >= 3]
+    startup_tokens = []
+    for t in re.split(r"[^a-z0-9]+", core_query.lower()):
+        if len(t) >= 3 and t not in legal_suffixes:
+            startup_tokens.append(t)
+    if not startup_tokens:
+        startup_tokens = [t for t in re.split(r"[^a-z0-9]+", query_clean.lower()) if len(t) >= 3]
+
     blocked_nsfw_terms = [
         "porn", "porno", "xxx", "adult", "sex", "xvideos", "xnxx", "pornhub", "redtube",
         "youporn", "brazzers", "onlyfans", "escort", "cams", "camgirl",
     ]
 
     enriched_queries = [
-        query,
-        f"{query} founders leadership team about",
-        f"{query} CEO CTO CFO COO CMO CPO management",
-        f"{query} startup funding investors valuation",
-        f"{query} founders background university",
-        f"{query} headquarters US Europe footprint",
-        f"{query} technology patents competitors alternatives",
-        f"site:startupticker.ch {query}",
-        f"site:venturelab.swiss {query}",
-        f"site:venturelab.swiss {query} startup",
+        query_clean,
+        f"\"{core_query}\" startup",
+        f"\"{core_query}\" founders leadership team",
+        f"\"{core_query}\" CEO CTO CFO COO CMO CPO management",
+        f"\"{core_query}\" funding investors valuation",
+        f"\"{core_query}\" deep tech startup",
+        f"\"{core_query}\" headquarters US Europe footprint",
+        f"\"{core_query}\" technology patents competitors alternatives",
+        f"site:startupticker.ch \"{core_query}\"",
+        f"site:venturelab.swiss \"{core_query}\"",
     ]
 
     cleaned_results: List[Dict[str, Any]] = []
@@ -1374,6 +1393,7 @@ def search_duckduckgo(query: str, max_results: int = 30) -> List[Dict[str, Any]]
                     text_blob = (
                         f"{r.get('title', '')} {r.get('body') or r.get('snippet') or ''} {lower_href}"
                     ).lower()
+                    name_match = any(tok in text_blob for tok in startup_tokens) if startup_tokens else True
                     if any(skip in lower_href for skip in ["login", "password"]):
                         continue
                     if any(term in text_blob for term in blocked_nsfw_terms):
@@ -1386,6 +1406,7 @@ def search_duckduckgo(query: str, max_results: int = 30) -> List[Dict[str, Any]]
                             "title": r.get("title", "").strip(),
                             "body": (r.get("body") or r.get("snippet") or "").strip(),
                             "href": href,
+                            "name_match": name_match,
                         }
                     )
             except Exception:
@@ -1406,6 +1427,7 @@ def search_duckduckgo(query: str, max_results: int = 30) -> List[Dict[str, Any]]
                         text_blob = (
                             f"{r.get('title', '')} {r.get('body') or r.get('snippet') or ''} {lower_href}"
                         ).lower()
+                        name_match = any(tok in text_blob for tok in startup_tokens) if startup_tokens else True
                         if any(skip in lower_href for skip in ["login", "password"]):
                             continue
                         if any(term in text_blob for term in blocked_nsfw_terms):
@@ -1416,6 +1438,7 @@ def search_duckduckgo(query: str, max_results: int = 30) -> List[Dict[str, Any]]
                                 "title": r.get("title", "").strip(),
                                 "body": (r.get("body") or r.get("snippet") or "").strip(),
                                 "href": href,
+                                "name_match": name_match,
                             }
                         )
                 except Exception:
@@ -1446,6 +1469,8 @@ def search_duckduckgo(query: str, max_results: int = 30) -> List[Dict[str, Any]]
             score += 5
         if any(tok in text for tok in startup_tokens):
             score += 3
+        if r.get("name_match"):
+            score += 12
 
         # Penalize low-signal utility pages.
         if any(skip in href for skip in ["login", "signup", "privacy", "terms"]):
@@ -1453,6 +1478,11 @@ def search_duckduckgo(query: str, max_results: int = 30) -> List[Dict[str, Any]]
         return score
 
     cleaned_results.sort(key=score_result, reverse=True)
+
+    # Keep output anchored to the startup entity first.
+    name_matched = [r for r in cleaned_results if r.get("name_match")]
+    if len(name_matched) >= 3:
+        cleaned_results = name_matched + [r for r in cleaned_results if not r.get("name_match")]
 
     # If everything failed, surface meaningful diagnostics instead of silent "no signal."
     if not cleaned_results and search_errors:
@@ -2274,6 +2304,10 @@ def generate_best_of_multiple_attempts(
         ):
             best_evidence_seen = evidence
 
+        # Hard floor: do not draft briefs when zero startup-name relevance is detected.
+        if evidence.get("startup_relevance_hits", 0) == 0:
+            continue
+
         # In strict mode, skip weak evidence attempts and keep trying.
         if reliability_mode == "Strict" and not evidence.get("enough", False):
             continue
@@ -2504,6 +2538,15 @@ def main() -> None:
                         if run.get("no_signal_attempts", 0) >= 3:
                             status.update(label="No public signal found.", state="error")
                             st.warning("No public signal found. The company might be in stealth. Try adding an exact URL.")
+                            return
+
+                        if best_evidence_seen and best_evidence_seen.get("startup_relevance_hits", 0) == 0:
+                            st.session_state["evidence_quality"] = best_evidence_seen
+                            status.update(label="No startup-matching signal found.", state="error")
+                            st.warning(
+                                "Search results did not reliably match this startup name. "
+                                "Try adding the exact website URL or a more specific legal/company name."
+                            )
                             return
 
                         if reliability_mode == "Strict" and best_evidence_seen and not best_evidence_seen.get("enough", False):
