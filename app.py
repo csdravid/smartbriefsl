@@ -1,4 +1,5 @@
 import os
+import base64
 import datetime
 import json
 import re
@@ -23,8 +24,6 @@ from openai import OpenAI
 
 EUROUS_LOGO_URL = "https://eurousventures.com/wp-content/uploads/2024/11/logo_eurousventures_2025_.png"
 EUROUS_FAVICON_URL = "https://eurousventures.com/favicon.ico"
-BACKGROUND_VIDEO_CANDIDATES = [
-]
 
 st.set_page_config(
     page_title="EuroUS Intelligence",
@@ -36,15 +35,61 @@ st.set_page_config(
 
 def inject_meta_tags() -> None:
     meta_html = """
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <div id="sb-meta-injector" style="display:none!important">
+      <script>
+      (function () {
+        function upsertMeta(name, content) {
+          var m = document.querySelector('meta[name="' + name + '"]');
+          if (!m) {
+            m = document.createElement('meta');
+            m.setAttribute('name', name);
+            document.head.appendChild(m);
+          }
+          m.setAttribute('content', content);
+        }
+        upsertMeta('apple-mobile-web-app-capable', 'yes');
+        upsertMeta('viewport', 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no');
+
+        function hideInjectorContainerById(id) {
+          var el = document.getElementById(id);
+          if (!el) return;
+          var c = el.closest('[data-testid="stElementContainer"]');
+          if (c) {
+            c.style.display = 'none';
+            c.style.margin = '0';
+            c.style.padding = '0';
+            c.style.minHeight = '0';
+            c.style.height = '0';
+          }
+        }
+
+        var ids = [
+          'sb-meta-injector',
+          'sb-global-style',
+          'sb-motion-style',
+          'sb-motion-style-medium',
+          'sb-print-style',
+          'sb-dark-style',
+          'sb-video-layer',
+          'sb-stage-layer'
+        ];
+        ids.forEach(hideInjectorContainerById);
+        var ticks = 0;
+        var iv = setInterval(function () {
+          ids.forEach(hideInjectorContainerById);
+          ticks += 1;
+          if (ticks > 30) clearInterval(iv);
+        }, 120);
+      })();
+      </script>
+    </div>
     """
-    st.markdown(f"<head>{meta_html}</head>", unsafe_allow_html=True)
+    st.markdown(meta_html, unsafe_allow_html=True)
 
 
 def inject_mobile_and_print_css() -> None:
     css = """
-    <style>
+    <style id="sb-global-style">
     @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700;800&family=Oxanium:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
     :root {
@@ -84,9 +129,22 @@ def inject_mobile_and_print_css() -> None:
         --shift-charcoal: #054a91;
         --shift-ash: #dbe4ee;
     }
+    /* Hide Streamlit containers that only carry our injected meta/style blocks. */
+    [data-testid="stElementContainer"]:has(#sb-meta-injector),
+    [data-testid="stElementContainer"]:has(style#sb-global-style),
+    [data-testid="stElementContainer"]:has(style#sb-motion-style),
+    [data-testid="stElementContainer"]:has(style#sb-motion-style-medium),
+    [data-testid="stElementContainer"]:has(style#sb-print-style),
+    [data-testid="stElementContainer"]:has(style#sb-dark-style) {
+        display: none !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        min-height: 0 !important;
+        height: 0 !important;
+    }
 
     html, body, [data-testid="stAppViewContainer"] {
-        background-color: var(--eurous-bg) !important;
+        background-color: #dbe4ee !important;
         background-image: none !important;
         color: var(--eurous-navy-1) !important;
         font-family: var(--font-body);
@@ -94,6 +152,43 @@ def inject_mobile_and_print_css() -> None:
     }
     [data-testid="stAppViewContainer"] {
         position: relative !important;
+    }
+    .video-bg-wrap {
+        position: fixed;
+        inset: 0;
+        z-index: -2;
+        pointer-events: none;
+        overflow: hidden;
+    }
+    .video-bg-wrap video {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        filter: saturate(1.02) contrast(1.06) brightness(0.88);
+    }
+    .video-bg-overlay {
+        position: absolute;
+        inset: 0;
+        background:
+            radial-gradient(circle at 50% 48%, rgba(10, 18, 40, 0.08) 0%, rgba(10, 18, 40, 0.24) 70%, rgba(10, 18, 40, 0.34) 100%),
+            linear-gradient(180deg, rgba(7, 13, 30, 0.32) 0%, rgba(7, 13, 30, 0.18) 45%, rgba(7, 13, 30, 0.36) 100%);
+    }
+    /* Single source of truth: persistent opaque app stage. */
+    .sb-opaque-stage {
+        position: fixed;
+        top: 0;
+        bottom: 0;
+        left: 50%;
+        transform: translateX(-50%);
+        width: min(900px, calc(100vw - 0.2rem));
+        height: auto;
+        background: #eef3f9 !important;
+        border: 1px solid #b7c9de;
+        outline: 1px solid rgba(255, 255, 255, 0.42);
+        outline-offset: -1px;
+        box-shadow: none;
+        pointer-events: none;
+        z-index: 0;
     }
     .lineart-stage {
         display: none !important;
@@ -106,29 +201,74 @@ def inject_mobile_and_print_css() -> None:
         padding-left: 0.8rem !important;
         padding-right: 0.8rem !important;
     }
-    [data-testid="stAppViewContainer"] > .main {
+    [data-testid="stAppViewContainer"] > .main,
+    [data-testid="stAppViewContainer"] .main,
+    section.main,
+    [data-testid="stMain"] {
         padding-left: 0.35rem !important;
         padding-right: 0.35rem !important;
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+        margin-top: 0 !important;
+        position: relative;
+        z-index: 1;
+        max-width: 980px !important;
+        margin: 0 auto !important;
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+    }
+    [data-testid="stMainBlockContainer"],
+    [data-testid="stAppViewContainer"] [data-testid="stMainBlockContainer"] {
+        padding-top: 0 !important;
+        margin-top: -0.78rem !important;
+    }
+    [data-testid="stAppViewContainer"] .main > div:first-child,
+    [data-testid="stMain"] > div:first-child,
+    section.main > div:first-child {
+        margin-top: 0 !important;
+        padding-top: 0 !important;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        max-width: 940px !important;
+        margin: 0 auto 0.35rem auto !important;
+        background: #eef3f9 !important;
+        background-color: #eef3f9 !important;
+        background-image: none !important;
+        opacity: 1 !important;
+        border: 1px solid #c6d6e8 !important;
+        box-shadow: 0 26px 56px rgba(2, 10, 30, 0.42) !important;
+        padding: 0 0.15rem 0.2rem 0.15rem !important;
+        position: relative !important;
+        top: -0.45rem !important;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"] > div {
+        background: #eef3f9 !important;
+        background-color: #eef3f9 !important;
+        background-image: none !important;
+        opacity: 1 !important;
+        padding-top: 0 !important;
+        margin-top: 0 !important;
     }
 
-    header, footer, [data-testid="stToolbar"], [data-testid="stSidebar"] {
+    header, footer, [data-testid="stToolbar"], [data-testid="stSidebar"], [data-testid="stDecoration"] {
         display: none !important;
     }
 
     .block-container {
-        padding-top: 0.8rem;
+        padding-top: 0 !important;
         padding-bottom: var(--space-6);
         padding-left: 0.8rem;
         padding-right: 0.8rem;
         max-width: 920px;
-        margin: 0 auto;
-        background-color: #eef3f9 !important;
-        border: 1px solid #c6d6e8;
+        margin: 0 auto !important;
+        background-color: transparent !important;
+        border: none !important;
         border-radius: var(--radius-lg);
-        box-shadow: none;
+        box-shadow: none !important;
         overflow: visible;
         max-height: none !important;
-        animation: pageEnter 700ms var(--ease-out) both;
+        animation: none !important;
         position: relative;
         z-index: 1;
         isolation: isolate;
@@ -137,9 +277,12 @@ def inject_mobile_and_print_css() -> None:
         content: "";
         position: absolute;
         inset: 0;
-        background: #eef3f9;
+        background: transparent !important;
         z-index: -1;
         pointer-events: none;
+    }
+    [data-testid="stAppViewContainer"] .main .block-container {
+        margin-top: 0 !important;
     }
 
     .shift-hero {
@@ -813,8 +956,8 @@ def inject_mobile_and_print_css() -> None:
     @keyframes caretBlink { 50% { border-color: transparent; } }
     @keyframes caretHide { to { border-right-color: transparent; } }
     @keyframes pageEnter {
-        from { opacity: 0; transform: translateY(10px) scale(0.995); }
-        to { opacity: 1; transform: translateY(0) scale(1); }
+        from { opacity: 0; }
+        to { opacity: 1; }
     }
     @keyframes cardIn {
         from { opacity: 0; transform: translateY(10px); }
@@ -950,6 +1093,21 @@ def inject_mobile_and_print_css() -> None:
             border-top: 1px solid rgba(17, 21, 33, 0.14);
         }
     }
+
+    /* FINAL OPAQUE FRAME OVERRIDE (must stay last in base CSS) */
+    [data-testid="stVerticalBlockBorderWrapper"],
+    [data-testid="stVerticalBlockBorderWrapper"] > div,
+    [data-testid="stVerticalBlockBorderWrapper"] > div > div,
+    [data-testid="stAppViewContainer"] > .main {
+        background: #eef3f9 !important;
+        background-color: #eef3f9 !important;
+        background-image: none !important;
+        opacity: 1 !important;
+        backdrop-filter: none !important;
+    }
+    [data-testid="stAppViewContainer"]::before {
+        content: none !important;
+    }
     </style>
     """
     st.markdown(css, unsafe_allow_html=True)
@@ -963,7 +1121,7 @@ def inject_motion_mode_css() -> None:
     if mode == "Off":
         st.markdown(
             """
-            <style>
+            <style id="sb-motion-style">
             *, *::before, *::after {
                 animation: none !important;
                 transition: none !important;
@@ -978,7 +1136,7 @@ def inject_motion_mode_css() -> None:
     if mode == "Medium":
         st.markdown(
             """
-            <style>
+            <style id="sb-motion-style-medium">
             :root {
                 --motion-fast: 240ms;
                 --motion-base: 360ms;
@@ -1002,13 +1160,26 @@ def inject_print_preview_css() -> None:
         return
     st.markdown(
         """
-        <style>
+        <style id="sb-print-style">
         .shift-hero-right-status,
         .controls-row,
         .reliability-badge-wrap,
         [data-testid="stToggle"],
         [data-baseweb="select"] {
             display: none !important;
+        }
+        .shift-hero-right {
+            display: flex !important;
+            min-height: 100% !important;
+        }
+        .shift-hero-right-copy {
+            flex: 1 1 auto !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: flex-start !important;
+            padding: 1.05rem 0.85rem 0.6rem 0.85rem !important;
+            line-height: 1.28 !important;
+            border-bottom: none !important;
         }
         .block-container {
             max-width: 920px !important;
@@ -1031,6 +1202,42 @@ def inject_print_preview_css() -> None:
     )
 
 
+@st.cache_data(show_spinner=False)
+def _load_video_base64(video_path: str) -> str:
+    return base64.b64encode(Path(video_path).read_bytes()).decode("ascii")
+
+
+def render_background_video() -> None:
+    video_path: Path | None = None
+    for candidate in BACKGROUND_VIDEO_CANDIDATES:
+        if candidate.exists():
+            video_path = candidate
+            break
+    if video_path is None:
+        return
+
+    try:
+        encoded_video = _load_video_base64(str(video_path))
+    except Exception:
+        return
+
+    st.markdown(
+        f"""
+        <div id="sb-video-layer" class="video-bg-wrap" aria-hidden="true">
+            <video autoplay muted playsinline preload="auto">
+                <source src="data:video/mp4;base64,{encoded_video}" type="video/mp4">
+            </video>
+            <div class="video-bg-overlay"></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_opaque_stage() -> None:
+    st.markdown('<div id="sb-stage-layer" class="sb-opaque-stage" aria-hidden="true"></div>', unsafe_allow_html=True)
+
+
 def inject_dark_mode_css() -> None:
     """Optional dark mode overrides controlled by header toggle."""
     if not st.session_state.get("dark_mode", False):
@@ -1038,7 +1245,7 @@ def inject_dark_mode_css() -> None:
 
     st.markdown(
         """
-        <style>
+        <style id="sb-dark-style">
         :root {
             --dm-1: #020969;
             --dm-2: #09316c;
@@ -1049,19 +1256,47 @@ def inject_dark_mode_css() -> None:
             --dm-7: #2dfa7c;
         }
         html, body, [data-testid="stAppViewContainer"] {
-            background: transparent !important;
+            background: #020969 !important;
             color: #EFFFF6 !important;
+        }
+        .video-bg-wrap video {
+            filter: saturate(0.88) contrast(1.08) brightness(0.54) !important;
+        }
+        .video-bg-overlay {
+            background:
+                radial-gradient(circle at 48% 42%, rgba(3, 15, 44, 0.2) 0%, rgba(3, 15, 44, 0.42) 70%, rgba(3, 15, 44, 0.58) 100%),
+                linear-gradient(180deg, rgba(2, 9, 24, 0.48) 0%, rgba(2, 9, 24, 0.36) 48%, rgba(2, 9, 24, 0.56) 100%) !important;
         }
         .lineart-stage {
             display: none !important;
         }
         .block-container {
-            background: linear-gradient(180deg, #020969, #09316c) !important;
-            border-color: rgba(38, 210, 121, 0.42) !important;
-            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.42) !important;
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+        }
+        [data-testid="stAppViewContainer"] > .main {
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
         }
         .block-container::before {
+            background: transparent !important;
+        }
+        [data-testid="stVerticalBlockBorderWrapper"] {
             background: linear-gradient(180deg, #020969, #09316c) !important;
+            background-color: #020969 !important;
+            background-image: linear-gradient(180deg, #020969, #09316c) !important;
+            opacity: 1 !important;
+            border: 1px solid rgba(38, 210, 121, 0.42) !important;
+            box-shadow: 0 14px 34px rgba(0, 0, 0, 0.46) !important;
+            top: -0.45rem !important;
+        }
+        [data-testid="stVerticalBlockBorderWrapper"] > div {
+            background: linear-gradient(180deg, #020969, #09316c) !important;
+            background-color: #020969 !important;
+            background-image: linear-gradient(180deg, #020969, #09316c) !important;
+            opacity: 1 !important;
         }
         .shift-hero {
             border-color: rgba(38, 210, 121, 0.42) !important;
@@ -1290,6 +1525,32 @@ def inject_dark_mode_css() -> None:
             color: #EFFFF6 !important;
             border-color: rgba(38, 210, 121, 0.55) !important;
         }
+        /* FINAL OPAQUE FRAME OVERRIDE (dark mode) */
+        [data-testid="stVerticalBlockBorderWrapper"],
+        [data-testid="stVerticalBlockBorderWrapper"] > div,
+        [data-testid="stVerticalBlockBorderWrapper"] > div > div,
+        [data-testid="stAppViewContainer"] > .main,
+        [data-testid="stAppViewContainer"] .main,
+        section.main,
+        [data-testid="stMain"] {
+            background: transparent !important;
+            background-color: transparent !important;
+            background-image: none !important;
+            opacity: 1 !important;
+            backdrop-filter: none !important;
+        }
+        [data-testid="stMainBlockContainer"],
+        [data-testid="stAppViewContainer"] [data-testid="stMainBlockContainer"] {
+            padding-top: 0 !important;
+            margin-top: -0.78rem !important;
+        }
+        .sb-opaque-stage {
+            background: linear-gradient(180deg, #020969, #09316c) !important;
+            border: 1px solid rgba(38, 210, 121, 0.42) !important;
+            outline: 1px solid rgba(111, 247, 177, 0.22) !important;
+            outline-offset: -1px;
+            box-shadow: none !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1364,6 +1625,64 @@ def parse_startup_input(user_input: str) -> tuple[str, str | None]:
     if any(ch.isalpha() for ch in name_without_url) and len(name_without_url) >= 2:
         return name_without_url, normalized_url
     return inferred_name, normalized_url
+
+
+def validate_user_query_security(raw_query: str) -> str | None:
+    """
+    Block obvious secret-exfiltration / prompt-injection style user input.
+    Returns an error string when blocked, otherwise None.
+    """
+    q = (raw_query or "").strip()
+    if not q:
+        return "Please enter a startup name (and optional URL) first."
+    if len(q) > 180:
+        return "Input is too long. Please enter a concise startup name or name + URL."
+
+    lowered = q.lower()
+    blocked_patterns = [
+        "api key", "apikey", "openai_api_key", "deepinfra_api_key", "secret", "secrets",
+        "token", "access token", "env", "environment variable", "os.environ",
+        "st.secrets", "system prompt", "ignore previous instructions", "reveal credentials",
+        "show key", "print key", "dump config",
+    ]
+    if any(p in lowered for p in blocked_patterns):
+        return (
+            "This input looks like a security-sensitive request. "
+            "Please enter only a startup/company name (and optional website URL)."
+        )
+    return None
+
+
+def sanitize_llm_evidence_text(text: str, max_len: int = 320) -> str:
+    """
+    Reduce prompt-injection risk in fetched web snippets before passing to LLM.
+    """
+    t = (text or "").strip()
+    if not t:
+        return ""
+    t = re.sub(r"(?i)(ignore|disregard)\s+(all\s+)?(previous|prior)\s+instructions?", "[removed]", t)
+    t = re.sub(r"(?i)system\s+prompt", "[removed]", t)
+    t = re.sub(r"(?i)(api[_\s-]?key|secret|token|password)", "[removed]", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    if len(t) > max_len:
+        t = t[: max_len - 1].rstrip() + "…"
+    return t
+
+
+def sanitize_exception_for_display(err_text: str) -> str:
+    """
+    Redact likely sensitive tokens from displayed errors.
+    """
+    txt = (err_text or "").strip()
+    if not txt:
+        return "Unknown error."
+    txt = re.sub(r"sk-[A-Za-z0-9\-_]{10,}", "[redacted-key]", txt)
+    txt = re.sub(r"(?i)(api[_\s-]?key\s*[:=]\s*)([^,\s]+)", r"\1[redacted]", txt)
+    txt = re.sub(r"(?i)(authorization\s*[:=]\s*bearer\s+)([^,\s]+)", r"\1[redacted]", txt)
+    # Keep UI tidy and avoid exposing large raw traces.
+    if len(txt) > 380:
+        txt = txt[:380].rstrip() + "…"
+    return txt
 
 
 def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | None = None) -> List[Dict[str, Any]]:
@@ -1600,8 +1919,130 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
     return cleaned_results
 
 
+def prepare_llm_context(
+    search_results: List[Dict[str, Any]],
+    max_results: int = 14,
+    max_per_domain: int = 2,
+    snippet_char_limit: int = 320,
+) -> List[Dict[str, Any]]:
+    """
+    Reduce token usage before prompt construction:
+    - keep top N results
+    - cap entries per domain
+    - dedupe URLs
+    - trim snippets
+    """
+    selected: List[Dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    domain_counts: Dict[str, int] = {}
+
+    for r in search_results:
+        href = (r.get("href") or "").strip()
+        if not href:
+            continue
+        key = href.rstrip("/").lower()
+        if key in seen_urls:
+            continue
+
+        domain = urlparse(href).netloc.lower()
+        if domain:
+            cnt = domain_counts.get(domain, 0)
+            if cnt >= max_per_domain:
+                continue
+            domain_counts[domain] = cnt + 1
+
+        title = (r.get("title") or "").strip()
+        body = (r.get("body") or "").strip()
+        title = sanitize_llm_evidence_text(title, max_len=160)
+        body = sanitize_llm_evidence_text(body, max_len=snippet_char_limit)
+
+        selected.append(
+            {
+                "title": title,
+                "body": body,
+                "href": href,
+            }
+        )
+        seen_urls.add(key)
+
+        if len(selected) >= max_results:
+            break
+
+    # Fallback safety: if domain capping is too strict, keep at least a few top results.
+    if not selected:
+        for r in search_results[: max(4, min(8, max_results))]:
+            href = (r.get("href") or "").strip()
+            if not href:
+                continue
+            selected.append(
+                {
+                    "title": (r.get("title") or "").strip(),
+                    "body": sanitize_llm_evidence_text((r.get("body") or "").strip(), max_len=snippet_char_limit),
+                    "href": href,
+                }
+            )
+    return selected
+
+
+def _results_fingerprint(search_results: List[Dict[str, Any]], max_items: int = 20) -> str:
+    parts: List[str] = []
+    for r in search_results[:max_items]:
+        href = (r.get("href") or "").strip().lower()
+        title = (r.get("title") or "").strip().lower()
+        body = (r.get("body") or "").strip().lower()[:80]
+        parts.append(f"{href}|{title}|{body}")
+    return "||".join(parts)
+
+
+def get_cached_normalized_context(
+    startup_name: str,
+    search_results: List[Dict[str, Any]],
+    ttl_seconds: int = 600,
+) -> List[Dict[str, Any]]:
+    """
+    Cache normalized LLM context per startup for a short window.
+    Cache is invalidated when search-result fingerprint changes.
+    """
+    cache = st.session_state.get("normalized_context_cache")
+    if not isinstance(cache, dict):
+        cache = {}
+        st.session_state["normalized_context_cache"] = cache
+
+    key = (startup_name or "").strip().lower()
+    now = time.time()
+    fp = _results_fingerprint(search_results)
+    entry = cache.get(key)
+
+    if entry:
+        age = now - float(entry.get("ts", 0))
+        if age <= ttl_seconds and entry.get("fingerprint") == fp and isinstance(entry.get("context"), list):
+            st.session_state["last_context_cache_status"] = "hit"
+            st.session_state["last_context_cache_age_s"] = int(age)
+            st.session_state["last_context_cache_items"] = len(entry.get("context") or [])
+            return entry["context"]
+
+    context = prepare_llm_context(
+        search_results,
+        max_results=14,
+        max_per_domain=2,
+        snippet_char_limit=320,
+    )
+    cache[key] = {"ts": now, "fingerprint": fp, "context": context}
+    st.session_state["last_context_cache_status"] = "miss"
+    st.session_state["last_context_cache_age_s"] = 0
+    st.session_state["last_context_cache_items"] = len(context)
+
+    # Keep cache bounded.
+    if len(cache) > 40:
+        sorted_items = sorted(cache.items(), key=lambda kv: float(kv[1].get("ts", 0)), reverse=True)
+        st.session_state["normalized_context_cache"] = dict(sorted_items[:30])
+
+    return context
+
+
 def build_llm_prompt(startup_name: str, search_results: List[Dict[str, Any]]) -> str:
     current_date = datetime.datetime.now().strftime("%B %Y")
+    context_results = get_cached_normalized_context(startup_name, search_results, ttl_seconds=600)
     lines = [
         f"Startup: {startup_name.strip()}",
         f"Current Date: {current_date}",
@@ -1609,7 +2050,7 @@ def build_llm_prompt(startup_name: str, search_results: List[Dict[str, Any]]) ->
         "Translate any French or German text to English.",
         "=== SEARCH RESULTS START ===",
     ]
-    for idx, r in enumerate(search_results, start=1):
+    for idx, r in enumerate(context_results, start=1):
         lines.append(f"\n[Result {idx}]")
         if r.get("title"):
             lines.append(f"Title: {r['title'].strip()}")
@@ -1621,52 +2062,35 @@ def build_llm_prompt(startup_name: str, search_results: List[Dict[str, Any]]) ->
     lines.append("\n=== SEARCH RESULTS END ===\n")
     lines.append(
         "TASK:\n"
-        "You are a ruthless Swiss Deep Tech Venture Capitalist acting on behalf of Lucian at EuroUS Ventures. "
-        "Use only the supplied results.\n\n"
-        "Carefully scan for:\n"
-        "- Academic pedigree and scientific moat.\n"
-        "- Geo-arbitrage (EU R&D vs US commercial expansion).\n"
-        "- Funding rounds, investors, valuation signals.\n"
-        "- Leadership with C-level titles (CEO, CTO, CFO, COO, CMO, CPO and full-title variants).\n"
-        "- Non-funding milestones, product launches, operational traction.\n"
-        "- Competitors and alternative solutions explicitly mentioned.\n\n"
-        "Icebreaker quality rules:\n"
-        "- Exactly 3 icebreaker bullets.\n"
-        "- Ready-to-say conversational openers for founder calls.\n"
-        "- Each icebreaker MUST be a question ending with '?'.\n"
-        "- Keep each short, slightly witty, and grounded in concrete facts.\n"
-        "- If leadership exists, the first icebreaker must use that.\n\n"
-        "Good examples:\n"
-        "- \"You shipped Gen 1 quickly for deep tech - what unlocked that execution speed?\"\n"
-        "- \"Your CEO came from [background] - what shaped your current thesis?\"\n"
-        "- \"You hit [milestone] early - what risk did that de-risk first?\"\n\n"
-        "Output structure (exact):\n"
+        "You are a ruthless Swiss deep-tech VC analyst for EuroUS Ventures. Use ONLY supplied results.\n"
+        "Prioritize: scientific moat, EU->US geo-arbitrage, funding/investors, C-level leadership "
+        "(CEO/CTO/CFO/COO/CMO/CPO), traction milestones, and competitors.\n\n"
+        "Icebreakers (strict): exactly 3 bullets; each is a short conversational question ending in '?'; "
+        "fact-grounded; if leadership exists, first bullet should reference it.\n\n"
+        "Return markdown in this EXACT section order:\n"
         "# [Startup Name]\n"
-        "**Deep Tech Value Prop**: [One-sentence description]\n\n"
+        "**Deep Tech Value Prop**: [1 sentence]\n"
         "## EuroUS Scorecard (1–5) – Summary\n"
         "- Scientific depth / IP defensibility — [1–5]/5 — [short tag]\n"
         "- EuroUS geo-arbitrage potential — [1–5]/5 — [short tag]\n"
         "- US go-to-market readiness — [1–5]/5 — [short tag]\n"
         "- Capital efficiency & funding fit — [1–5]/5 — [short tag]\n"
-        "- Strategic differentiation vs incumbents — [1–5]/5 — [short tag]\n\n"
+        "- Strategic differentiation vs incumbents — [1–5]/5 — [short tag]\n"
         "## Section 1 – The Hook & Origins\n"
-        "- **Icebreakers (3 bullets):** [3 bullets]\n"
-        "- **Founders & Leadership:** [bullets]\n"
-        "- **Scientific Pedigree:** [bullets]\n"
-        "- **Geo-Arbitrage & Expansion:** [bullets]\n"
-        "- **Traction & Funding:** [bullets]\n\n"
+        "- **Icebreakers (3 bullets):**\n"
+        "- **Founders & Leadership:**\n"
+        "- **Scientific Pedigree:**\n"
+        "- **Geo-Arbitrage & Expansion:**\n"
+        "- **Traction & Funding:**\n"
         "## Section 2 – The EuroUS Lens\n"
-        "- **Technical & Market Risks (The Bear Case):** [bullets]\n"
-        "- **Interrogation Questions:** [3 questions]\n\n"
+        "- **Technical & Market Risks (The Bear Case):**\n"
+        "- **Interrogation Questions:** [3 questions]\n"
         "## Section 3 – Competitor Radar\n"
-        "- [2-3 bullets]\n\n"
+        "- [2-3 bullets]\n"
         "## EuroUS Scorecard – Details\n"
-        "- [one rationale bullet per axis]\n\n"
-        "Formatting rules:\n"
-        "- No emojis.\n"
-        "- Wrap VC-critical metrics in inline code: `CHF 1.8M`, `Series A`, `TRL 7`, `18.8%`.\n"
-        "- Never hallucinate; if missing, say 'No public data found'.\n"
-        "- Do not output sources section or external links.\n"
+        "- [1 rationale bullet per scorecard axis]\n\n"
+        "Rules: no emojis; inline-code key metrics (`CHF 1.8M`, `Series A`, `TRL 7`, `18.8%`); "
+        "if missing evidence say 'No public data found'; do not output sources/links.\n"
     )
     return "\n".join(lines)
 
@@ -1702,7 +2126,7 @@ def create_openai_client() -> OpenAI:
     return OpenAI(api_key=api_key, base_url=base_url)
 
 
-def call_llm(prompt: str) -> str:
+def call_llm(prompt: str, max_tokens: int = 1600) -> str:
     client = create_openai_client()
     model_name = get_config_value("LLM_MODEL_NAME", "meta-llama/Meta-Llama-3-70B-Instruct")
     response = client.chat.completions.create(
@@ -1719,7 +2143,7 @@ def call_llm(prompt: str) -> str:
             {"role": "user", "content": prompt},
         ],
         temperature=0.0,
-        max_tokens=1600,
+        max_tokens=max_tokens,
     )
     return (response.choices[0].message.content or "").strip()
 
@@ -2344,6 +2768,39 @@ def _build_repair_prompt(
     return f"{base_prompt}\n\n--- REPAIR PASS ---\n{repair_instructions}"
 
 
+def _dynamic_max_tokens(startup_name: str, search_results: List[Dict[str, Any]], is_repair: bool = False) -> int:
+    """
+    Dynamically size output token budget based on evidence/context richness.
+    Lower budget for sparse evidence reduces token waste.
+    """
+    context = get_cached_normalized_context(startup_name, search_results, ttl_seconds=600)
+    ctx_count = len(context)
+    signals = _evidence_signals(search_results)
+    signal_count = sum(1 for v in signals.values() if v)
+
+    # Base budget tuned for the current response format.
+    if ctx_count <= 5:
+        budget = 980
+    elif ctx_count <= 9:
+        budget = 1180
+    elif ctx_count <= 12:
+        budget = 1360
+    else:
+        budget = 1520
+
+    # Small bump for richer multi-signal evidence.
+    if signal_count >= 3:
+        budget += 80
+    elif signal_count <= 1:
+        budget -= 70
+
+    # Repair pass may need slightly more room to fix structure gaps.
+    if is_repair:
+        budget += 120
+
+    return max(850, min(1700, budget))
+
+
 def generate_consistent_brief(startup_name: str, search_results: List[Dict[str, Any]]) -> str:
     """
     Two-pass generation:
@@ -2352,10 +2809,35 @@ def generate_consistent_brief(startup_name: str, search_results: List[Dict[str, 
     Returns the best-scoring draft.
     """
     base_prompt = build_llm_prompt(startup_name, search_results)
-    first = call_llm(base_prompt)
+    first_max_tokens = _dynamic_max_tokens(startup_name, search_results, is_repair=False)
+    first = call_llm(base_prompt, max_tokens=first_max_tokens)
     signals = _evidence_signals(search_results)
     score_first, missing_first = _brief_quality_score(first, signals)
+
+    first_text = (first or "").lower()
+    no_data_hits = first_text.count("no public data found")
+    critical_missing = any(
+        m in missing_first
+        for m in [
+            "## section 1",
+            "## section 2",
+            "## section 3",
+            "## eurous scorecard",
+            "interrogation questions",
+            "icebreakers",
+            "leadership evidence used",
+            "funding evidence used",
+            "competitor evidence used",
+        ]
+    )
+
+    # Skip repair for already-strong drafts to save tokens.
+    # Keep strict threshold, plus an "already good enough" short-circuit.
     if score_first >= 14:
+        return first
+    if score_first >= 11 and no_data_hits <= 4 and not critical_missing:
+        return first
+    if score_first >= 10 and len(missing_first) <= 1:
         return first
 
     repair_prompt = _build_repair_prompt(
@@ -2365,7 +2847,8 @@ def generate_consistent_brief(startup_name: str, search_results: List[Dict[str, 
         missing_items=missing_first,
         search_results=search_results,
     )
-    second = call_llm(repair_prompt)
+    repair_max_tokens = _dynamic_max_tokens(startup_name, search_results, is_repair=True)
+    second = call_llm(repair_prompt, max_tokens=repair_max_tokens)
     score_second, _ = _brief_quality_score(second, signals)
     return second if score_second >= score_first else first
 
@@ -2555,6 +3038,17 @@ def render_deployment_diagnostics() -> None:
                 f"- Parsed startup name: `{parsed_name or 'n/a'}`\n"
                 f"- Preferred URL: `{parsed_url or 'none'}`"
             )
+        cache_status = st.session_state.get("last_context_cache_status")
+        if cache_status:
+            cache_items = st.session_state.get("last_context_cache_items", 0)
+            cache_age = st.session_state.get("last_context_cache_age_s", 0)
+            cache_size = len(st.session_state.get("normalized_context_cache", {}) or {})
+            st.markdown(
+                f"- Normalized context cache: `{cache_status}`\n"
+                f"- Cached context items: `{cache_items}`\n"
+                f"- Cache age: `{cache_age}s`\n"
+                f"- Cache entries: `{cache_size}`"
+            )
 
         last_diag = st.session_state.get("last_run_diagnostics") or {}
         attempts = last_diag.get("attempt_stats") or []
@@ -2718,6 +3212,10 @@ def init_session_state() -> None:
         "last_run_diagnostics": None,
         "last_parsed_startup_name": None,
         "last_preferred_url": None,
+        "normalized_context_cache": {},
+        "last_context_cache_status": None,
+        "last_context_cache_age_s": 0,
+        "last_context_cache_items": 0,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -2728,176 +3226,184 @@ def main() -> None:
     ensure_config_ok()
     inject_meta_tags()
     inject_mobile_and_print_css()
+    render_opaque_stage()
     inject_motion_mode_css()
     inject_print_preview_css()
     inject_dark_mode_css()
     init_session_state()
 
-    query, generate_clicked = render_header()
-    render_brief_history_panel()
+    with st.container(border=True):
+        query, generate_clicked = render_header()
+        render_brief_history_panel()
 
-    if generate_clicked:
-        if not query:
-            st.warning("Please enter a startup name (and optional URL) first.")
-        else:
-            startup_name, preferred_url = parse_startup_input(query)
-            if not startup_name:
+        if generate_clicked:
+            if not query:
                 st.warning("Please enter a startup name (and optional URL) first.")
-                return
-            st.session_state["last_parsed_startup_name"] = startup_name
-            st.session_state["last_preferred_url"] = preferred_url
+            else:
+                security_msg = validate_user_query_security(query)
+                if security_msg:
+                    st.warning(security_msg)
+                    return
+                startup_name, preferred_url = parse_startup_input(query)
+                if not startup_name:
+                    st.warning("Please enter a startup name (and optional URL) first.")
+                    return
+                st.session_state["last_parsed_startup_name"] = startup_name
+                st.session_state["last_preferred_url"] = preferred_url
 
-            st.session_state["brief_markdown"] = None
-            st.session_state["search_results"] = []
-            st.session_state["error"] = None
-            st.session_state["last_query"] = startup_name
-            st.session_state["feedback_submitted"] = False
-            st.session_state["low_confidence"] = False
-            st.session_state["evidence_quality"] = None
+                st.session_state["brief_markdown"] = None
+                st.session_state["search_results"] = []
+                st.session_state["error"] = None
+                st.session_state["last_query"] = startup_name
+                st.session_state["feedback_submitted"] = False
+                st.session_state["low_confidence"] = False
+                st.session_state["evidence_quality"] = None
 
-            loader_placeholder = st.empty()
-            eta_placeholder = st.empty()
-            render_generation_loader(loader_placeholder)
-            with st.status("Initializing scan...", expanded=True) as status:
-                try:
-                    run_started = time.time()
-                    eta_low, eta_high = estimate_generation_window_seconds()
-                    eta_placeholder.caption(f"Estimated time: ~{eta_low}-{eta_high} seconds")
-                    reliability_mode = st.session_state.get("reliability_mode", "Balanced")
-                    status.update(label="Searching public signals and drafting brief...", state="running")
-                    run = generate_best_of_multiple_attempts(
-                        startup_name=startup_name,
-                        reliability_mode=reliability_mode,
-                        attempts=3,
-                        preferred_url=preferred_url,
-                        attempt_start_index=0,
-                    )
-                    best_candidate = run.get("best_candidate")
-                    best_evidence_seen = run.get("best_evidence_seen")
-
-                    # Adaptive extension: only escalate beyond 3 if needed.
-                    if not best_candidate:
-                        status.update(label="Still searching for stable signal...", state="running")
-                        run_extra = generate_best_of_multiple_attempts(
+                loader_placeholder = st.empty()
+                eta_placeholder = st.empty()
+                render_generation_loader(loader_placeholder)
+                with st.status("Initializing scan...", expanded=True) as status:
+                    try:
+                        run_started = time.time()
+                        eta_low, eta_high = estimate_generation_window_seconds()
+                        eta_placeholder.caption(f"Estimated time: ~{eta_low}-{eta_high} seconds")
+                        reliability_mode = st.session_state.get("reliability_mode", "Balanced")
+                        status.update(label="Searching public signals and drafting brief...", state="running")
+                        run = generate_best_of_multiple_attempts(
                             startup_name=startup_name,
                             reliability_mode=reliability_mode,
-                            attempts=2,
+                            attempts=3,
                             preferred_url=preferred_url,
-                            attempt_start_index=3,
+                            attempt_start_index=0,
                         )
-                        extra_candidate = run_extra.get("best_candidate")
-                        if extra_candidate:
-                            best_candidate = extra_candidate
-                        if (
-                            best_evidence_seen is None
-                            or (
-                                run_extra.get("best_evidence_seen")
-                                and run_extra["best_evidence_seen"].get("score", 0) > best_evidence_seen.get("score", 0)
+                        best_candidate = run.get("best_candidate")
+                        best_evidence_seen = run.get("best_evidence_seen")
+
+                        # Adaptive extension: only escalate beyond 3 if needed.
+                        if not best_candidate:
+                            status.update(label="Still searching for stable signal...", state="running")
+                            run_extra = generate_best_of_multiple_attempts(
+                                startup_name=startup_name,
+                                reliability_mode=reliability_mode,
+                                attempts=2,
+                                preferred_url=preferred_url,
+                                attempt_start_index=3,
                             )
-                        ):
-                            best_evidence_seen = run_extra.get("best_evidence_seen")
-
-                        run["attempt_stats"] = (run.get("attempt_stats") or []) + (run_extra.get("attempt_stats") or [])
-                        run["attempt_errors"] = (run.get("attempt_errors") or []) + (run_extra.get("attempt_errors") or [])
-                        run["no_signal_attempts"] = int(run.get("no_signal_attempts", 0)) + int(run_extra.get("no_signal_attempts", 0))
-                        if not run.get("best_candidate") and extra_candidate:
-                            run["best_candidate"] = extra_candidate
-
-                    st.session_state["last_run_diagnostics"] = run
-
-                    if not best_candidate:
-                        if run.get("no_signal_attempts", 0) >= 3:
-                            status.update(label="No public signal found.", state="error")
-                            attempt_stats = run.get("attempt_stats") or []
-                            blocked_like = sum(
-                                1 for a in attempt_stats if a.get("status") in {"search_blocked_or_empty", "no_signal"}
-                            )
-                            if blocked_like >= 2:
-                                st.warning(
-                                    "Search provider returned too few results on this deployment run. "
-                                    "Please retry in ~30-60s or add more specific keywords (country/category)."
+                            extra_candidate = run_extra.get("best_candidate")
+                            if extra_candidate:
+                                best_candidate = extra_candidate
+                            if (
+                                best_evidence_seen is None
+                                or (
+                                    run_extra.get("best_evidence_seen")
+                                    and run_extra["best_evidence_seen"].get("score", 0) > best_evidence_seen.get("score", 0)
                                 )
-                            else:
-                                st.warning(
-                                    "No public signal found. The company might be in stealth. Try adding an exact URL."
+                            ):
+                                best_evidence_seen = run_extra.get("best_evidence_seen")
+
+                            run["attempt_stats"] = (run.get("attempt_stats") or []) + (run_extra.get("attempt_stats") or [])
+                            run["attempt_errors"] = (run.get("attempt_errors") or []) + (run_extra.get("attempt_errors") or [])
+                            run["no_signal_attempts"] = int(run.get("no_signal_attempts", 0)) + int(run_extra.get("no_signal_attempts", 0))
+                            if not run.get("best_candidate") and extra_candidate:
+                                run["best_candidate"] = extra_candidate
+
+                        st.session_state["last_run_diagnostics"] = run
+
+                        if not best_candidate:
+                            if run.get("no_signal_attempts", 0) >= 3:
+                                status.update(label="No public signal found.", state="error")
+                                attempt_stats = run.get("attempt_stats") or []
+                                blocked_like = sum(
+                                    1 for a in attempt_stats if a.get("status") in {"search_blocked_or_empty", "no_signal"}
                                 )
-                            return
+                                if blocked_like >= 2:
+                                    st.warning(
+                                        "Search provider returned too few results on this deployment run. "
+                                        "Please retry in ~30-60s or add more specific keywords (country/category)."
+                                    )
+                                else:
+                                    st.warning(
+                                        "No public signal found. The company might be in stealth. Try adding an exact URL."
+                                    )
+                                return
 
-                        if best_evidence_seen and best_evidence_seen.get("startup_relevance_hits", 0) == 0:
-                            st.session_state["evidence_quality"] = best_evidence_seen
-                            status.update(label="No startup-matching signal found.", state="error")
+                            if best_evidence_seen and best_evidence_seen.get("startup_relevance_hits", 0) == 0:
+                                st.session_state["evidence_quality"] = best_evidence_seen
+                                status.update(label="No startup-matching signal found.", state="error")
+                                st.warning(
+                                    "Search results did not reliably match this startup name. "
+                                    "Try adding the exact website URL or a more specific legal/company name."
+                                )
+                                return
+
+                            if reliability_mode == "Strict" and best_evidence_seen and not best_evidence_seen.get("enough", False):
+                                st.session_state["evidence_quality"] = best_evidence_seen
+                                status.update(label="Insufficient high-quality public signal.", state="error")
+                                st.warning(
+                                    "Signal quality is too weak for a reliable brief. "
+                                    "Add the exact company URL, country, or legal entity name and retry."
+                                )
+                                st.info(
+                                    f"Quality score: {best_evidence_seen['score']} | Trusted sources: {best_evidence_seen['trusted_hits']} | "
+                                    f"Unique domains: {best_evidence_seen['unique_domains']} | "
+                                    f"Startup relevance hits: {best_evidence_seen['startup_relevance_hits']}"
+                                )
+                                if best_evidence_seen.get("reasons"):
+                                    st.caption("Weak areas: " + "; ".join(best_evidence_seen["reasons"]))
+                                return
+
+                            status.update(label="Unable to generate a stable brief.", state="error")
+                            details = run.get("attempt_errors", [])
+                            if details:
+                                st.caption("Attempt diagnostics: " + " | ".join(details[:2]))
                             st.warning(
-                                "Search results did not reliably match this startup name. "
-                                "Try adding the exact website URL or a more specific legal/company name."
+                                "Could not generate a reliable brief this run. Please retry with an exact company URL."
                             )
                             return
 
-                        if reliability_mode == "Strict" and best_evidence_seen and not best_evidence_seen.get("enough", False):
-                            st.session_state["evidence_quality"] = best_evidence_seen
-                            status.update(label="Insufficient high-quality public signal.", state="error")
-                            st.warning(
-                                "Signal quality is too weak for a reliable brief. "
-                                "Add the exact company URL, country, or legal entity name and retry."
-                            )
-                            st.info(
-                                f"Quality score: {best_evidence_seen['score']} | Trusted sources: {best_evidence_seen['trusted_hits']} | "
-                                f"Unique domains: {best_evidence_seen['unique_domains']} | "
-                                f"Startup relevance hits: {best_evidence_seen['startup_relevance_hits']}"
-                            )
-                            if best_evidence_seen.get("reasons"):
-                                st.caption("Weak areas: " + "; ".join(best_evidence_seen["reasons"]))
-                            return
+                        st.session_state["brief_markdown"] = best_candidate["brief_markdown"]
+                        st.session_state["search_results"] = best_candidate["search_results"]
+                        st.session_state["evidence_quality"] = best_candidate["evidence_quality"]
+                        st.session_state["low_confidence"] = bool(best_candidate["low_confidence"])
 
-                        status.update(label="Unable to generate a stable brief.", state="error")
-                        details = run.get("attempt_errors", [])
-                        if details:
-                            st.caption("Attempt diagnostics: " + " | ".join(details[:2]))
-                        st.warning("Could not generate a reliable brief this run. Please retry with an exact company URL.")
-                        return
+                        if len(best_candidate["search_results"]) < 4:
+                            st.info("Limited public signal found; brief quality may be lower. Try adding exact website URL.")
 
-                    st.session_state["brief_markdown"] = best_candidate["brief_markdown"]
-                    st.session_state["search_results"] = best_candidate["search_results"]
-                    st.session_state["evidence_quality"] = best_candidate["evidence_quality"]
-                    st.session_state["low_confidence"] = bool(best_candidate["low_confidence"])
+                        history = st.session_state.get("brief_history", [])
+                        history.insert(
+                            0,
+                            {
+                                "query": startup_name,
+                                "timestamp": datetime.datetime.now(ZoneInfo("Europe/Zurich")).strftime("%Y-%m-%d %H:%M"),
+                                "brief_markdown": st.session_state["brief_markdown"],
+                                "search_results": st.session_state["search_results"],
+                                "low_confidence": st.session_state.get("low_confidence", False),
+                                "evidence_quality": st.session_state.get("evidence_quality"),
+                            },
+                        )
+                        st.session_state["brief_history"] = history[:5]
+                        elapsed = int(time.time() - run_started)
+                        durations = st.session_state.get("generation_durations", [])
+                        durations.append(elapsed)
+                        st.session_state["generation_durations"] = durations[-20:]
+                        status.update(label=f"Dossier ready in {elapsed}s.", state="complete")
+                    except Exception as e:
+                        st.session_state["error"] = sanitize_exception_for_display(str(e))
+                        status.update(label="Error while generating dossier.", state="error")
+                    finally:
+                        loader_placeholder.empty()
+                        eta_placeholder.empty()
 
-                    if len(best_candidate["search_results"]) < 4:
-                        st.info("Limited public signal found; brief quality may be lower. Try adding exact website URL.")
+        if st.session_state.get("error"):
+            st.error(
+                "There was an issue generating this brief. This may be due to an API timeout or configuration problem.\n\n"
+                f"Details: {st.session_state['error']}"
+            )
 
-                    history = st.session_state.get("brief_history", [])
-                    history.insert(
-                        0,
-                        {
-                            "query": startup_name,
-                            "timestamp": datetime.datetime.now(ZoneInfo("Europe/Zurich")).strftime("%Y-%m-%d %H:%M"),
-                            "brief_markdown": st.session_state["brief_markdown"],
-                            "search_results": st.session_state["search_results"],
-                            "low_confidence": st.session_state.get("low_confidence", False),
-                            "evidence_quality": st.session_state.get("evidence_quality"),
-                        },
-                    )
-                    st.session_state["brief_history"] = history[:5]
-                    elapsed = int(time.time() - run_started)
-                    durations = st.session_state.get("generation_durations", [])
-                    durations.append(elapsed)
-                    st.session_state["generation_durations"] = durations[-20:]
-                    status.update(label=f"Dossier ready in {elapsed}s.", state="complete")
-                except Exception as e:
-                    st.session_state["error"] = str(e)
-                    status.update(label="Error while generating dossier.", state="error")
-                finally:
-                    loader_placeholder.empty()
-                    eta_placeholder.empty()
+        if st.session_state.get("brief_markdown"):
+            render_brief(st.session_state["brief_markdown"], st.session_state.get("search_results", []))
 
-    if st.session_state.get("error"):
-        st.error(
-            "There was an issue generating this brief. This may be due to an API timeout or configuration problem.\n\n"
-            f"Details: {st.session_state['error']}"
-        )
-
-    if st.session_state.get("brief_markdown"):
-        render_brief(st.session_state["brief_markdown"], st.session_state.get("search_results", []))
-
-    render_deployment_diagnostics()
+        render_deployment_diagnostics()
 
 
 if __name__ == "__main__":
