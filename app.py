@@ -1816,6 +1816,52 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
             search_errors.append(f"Query '{q}' failed across backends ({'; '.join(backend_errors[:8])})")
         return []
 
+    def fetch_exhaustive(ddgs_client: DDGS, q: str, limit: int) -> List[Dict[str, Any]]:
+        """Slower but broader fallback used only when signal is weak."""
+        backend_errors: List[str] = []
+        combos = [
+            ("lite", "wt-wt"),
+            ("html", "wt-wt"),
+            ("auto", "wt-wt"),
+            ("lite", "us-en"),
+            ("html", "us-en"),
+            ("auto", "us-en"),
+            ("lite", "ch-de"),
+            ("html", "ch-de"),
+            ("auto", "ch-de"),
+            ("lite", "uk-en"),
+        ]
+        for backend, region in combos:
+            if (time.time() - search_started_at) > search_budget_s:
+                backend_errors.append("search-budget-exceeded")
+                break
+            try:
+                rows = list(
+                    ddgs_client.text(
+                        q,
+                        max_results=limit,
+                        backend=backend,
+                        region=region,
+                        safesearch="strict",
+                    )
+                )
+                if rows:
+                    return rows
+                backend_errors.append(f"{backend}/{region}: empty")
+            except TypeError:
+                try:
+                    rows = list(ddgs_client.text(q, max_results=limit, backend=backend))
+                    if rows:
+                        return rows
+                    backend_errors.append(f"{backend}/{region}: empty-fallback")
+                except Exception:
+                    backend_errors.append(f"{backend}/{region}: fallback failed")
+            except Exception:
+                backend_errors.append(f"{backend}/{region}: request failed")
+        if backend_errors:
+            search_errors.append(f"Exhaustive query '{q}' failed ({'; '.join(backend_errors[:8])})")
+        return []
+
     with DDGS() as ddgs:
         per_query = max(4, max_results // max(1, len(enriched_queries)))
         empty_query_streak = 0
@@ -2124,6 +2170,66 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                         )
                         if len(cleaned_results) >= collect_cap:
                             break
+                    if len(cleaned_results) >= collect_cap:
+                        break
+                if len(cleaned_results) >= collect_cap:
+                    break
+
+        # Final rescue: broaden query shape + backend/region matrix if signal is still weak.
+        if len(cleaned_results) < 6 and (time.time() - search_started_at) < (search_budget_s * 0.92):
+            rescue_queries = [
+                core_query,
+                f"{core_query} founders leadership",
+                f"{core_query} ceo cto cfo",
+                f"{core_query} funding investors series seed",
+                f"{core_query} crunchbase linkedin startup.ch",
+            ]
+            if preferred_domain:
+                rescue_queries.extend(
+                    [
+                        f"site:{preferred_domain} team",
+                        f"site:{preferred_domain} leadership",
+                        f"site:{preferred_domain} investors funding",
+                    ]
+                )
+            for rq in rescue_queries:
+                if (time.time() - search_started_at) > search_budget_s:
+                    search_errors.append("Search budget exceeded during exhaustive rescue phase.")
+                    break
+                try:
+                    rows = fetch_exhaustive(ddgs, rq, 10)
+                except Exception:
+                    continue
+                for r in rows:
+                    href = (r.get("href") or r.get("url") or "").strip()
+                    canonical_href = _canonicalize_url(href)
+                    if not href or canonical_href in seen_urls:
+                        continue
+                    lower_href = href.lower()
+                    domain = urlparse(lower_href).netloc.lower().replace("www.", "")
+                    text_blob = (
+                        f"{r.get('title', '')} {r.get('body') or r.get('snippet') or ''} {lower_href}"
+                    ).lower()
+                    has_business_signal = any(term in text_blob for term in business_terms)
+                    off_topic_hit = any(term in text_blob for term in off_topic_terms) or any(
+                        od in domain for od in off_topic_domains
+                    )
+                    if any(skip in lower_href for skip in ["login", "password"]):
+                        continue
+                    if any(term in text_blob for term in blocked_nsfw_terms):
+                        continue
+                    if off_topic_hit and not has_business_signal:
+                        continue
+                    seen_urls.add(canonical_href)
+                    cleaned_results.append(
+                        {
+                            "title": r.get("title", "").strip(),
+                            "body": (r.get("body") or r.get("snippet") or "").strip(),
+                            "href": href,
+                            "name_match": any(tok in text_blob for tok in startup_tokens) if startup_tokens else True,
+                            "synthetic": False,
+                        }
+                    )
                     if len(cleaned_results) >= collect_cap:
                         break
                 if len(cleaned_results) >= collect_cap:
@@ -3255,6 +3361,22 @@ def generate_best_of_multiple_attempts(
             attempt_info["status"] = "filtered_too_few_real_results"
             attempt_stats.append(attempt_info)
             continue
+
+        # Balanced safeguard: reject ultra-thin candidates so we don't ship obvious junk briefs.
+        if (
+            reliability_mode.lower() == "balanced"
+            and len(real_results) <= 2
+        ):
+            quick_evidence = evaluate_evidence_quality(
+                startup_name,
+                real_results,
+                reliability_mode=reliability_mode,
+            )
+            if quick_evidence.get("score", 0) <= 3:
+                attempt_info["status"] = "filtered_ultra_weak_balanced_candidate"
+                attempt_info["evidence_score"] = quick_evidence.get("score")
+                attempt_stats.append(attempt_info)
+                continue
 
         has_some_signal = _has_strict_fallback_signal(evidence)
         # In strict mode, still block near-zero signal, but allow low-signal generation
