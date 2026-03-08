@@ -2919,6 +2919,7 @@ def generate_best_of_multiple_attempts(
             real_results,
             reliability_mode=reliability_mode,
         )
+        is_balanced = reliability_mode.lower() == "balanced"
         attempt_info["evidence_score"] = evidence.get("score")
         attempt_info["trusted_hits"] = evidence.get("trusted_hits")
         attempt_info["startup_relevance_hits"] = evidence.get("startup_relevance_hits")
@@ -2930,14 +2931,17 @@ def generate_best_of_multiple_attempts(
         ):
             best_evidence_seen = evidence
 
-        # Hard floor: do not draft briefs when zero startup-name relevance is detected.
-        if evidence.get("startup_relevance_hits", 0) == 0:
+        # Keep strict mode conservative; in balanced mode allow low-relevance
+        # attempts to proceed if there is at least some real public signal.
+        if (not is_balanced) and evidence.get("startup_relevance_hits", 0) == 0:
             attempt_info["status"] = "filtered_zero_relevance"
             attempt_stats.append(attempt_info)
             continue
 
-        # Hard floor: if search returned very few real hits, skip drafting.
-        if len(real_results) < 3:
+        # Very sparse results are frequently caused by hosted-search throttling.
+        # Require >=3 only for strict mode; balanced accepts >=1.
+        min_real_results = 1 if is_balanced else 3
+        if len(real_results) < min_real_results:
             attempt_info["status"] = "filtered_too_few_real_results"
             attempt_stats.append(attempt_info)
             continue
@@ -3136,9 +3140,14 @@ def render_brief(brief_markdown: str, sources: List[Dict[str, Any]]) -> None:
 
     if st.session_state.get("low_confidence", False):
         ev = st.session_state.get("evidence_quality", {}) or {}
-        st.warning(
-            "Low-confidence brief: source signal was weak, but generation continued because Reliability mode is Balanced."
-        )
+        if st.session_state.get("strict_low_signal", False):
+            st.warning(
+                "Low-signal brief in Strict mode: source quality was weak, but generation continued because some public evidence was available."
+            )
+        else:
+            st.warning(
+                "Low-confidence brief: source signal was weak, but generation continued because Reliability mode is Balanced."
+            )
         if ev:
             st.caption(
                 f"Signal diagnostics - score: {ev.get('score', 'n/a')}, trusted sources: {ev.get('trusted_hits', 'n/a')}, "
@@ -3216,6 +3225,7 @@ def init_session_state() -> None:
         "last_context_cache_status": None,
         "last_context_cache_age_s": 0,
         "last_context_cache_items": 0,
+        "strict_low_signal": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -3257,6 +3267,7 @@ def main() -> None:
                 st.session_state["last_query"] = startup_name
                 st.session_state["feedback_submitted"] = False
                 st.session_state["low_confidence"] = False
+                st.session_state["strict_low_signal"] = False
                 st.session_state["evidence_quality"] = None
 
                 loader_placeholder = st.empty()
@@ -3337,20 +3348,30 @@ def main() -> None:
                                 return
 
                             if reliability_mode == "Strict" and best_evidence_seen and not best_evidence_seen.get("enough", False):
-                                st.session_state["evidence_quality"] = best_evidence_seen
-                                status.update(label="Insufficient high-quality public signal.", state="error")
-                                st.warning(
-                                    "Signal quality is too weak for a reliable brief. "
-                                    "Add the exact company URL, country, or legal entity name and retry."
+                                # Strict fallback: allow generation if there is at least some public signal,
+                                # but mark explicitly as low-signal strict output.
+                                has_some_signal = (
+                                    best_evidence_seen.get("unique_domains", 0) >= 1
+                                    and (
+                                        best_evidence_seen.get("startup_relevance_hits", 0) >= 1
+                                        or best_evidence_seen.get("trusted_hits", 0) >= 1
+                                    )
                                 )
-                                st.info(
-                                    f"Quality score: {best_evidence_seen['score']} | Trusted sources: {best_evidence_seen['trusted_hits']} | "
-                                    f"Unique domains: {best_evidence_seen['unique_domains']} | "
-                                    f"Startup relevance hits: {best_evidence_seen['startup_relevance_hits']}"
-                                )
-                                if best_evidence_seen.get("reasons"):
-                                    st.caption("Weak areas: " + "; ".join(best_evidence_seen["reasons"]))
-                                return
+                                if not has_some_signal:
+                                    st.session_state["evidence_quality"] = best_evidence_seen
+                                    status.update(label="Insufficient high-quality public signal.", state="error")
+                                    st.warning(
+                                        "Signal quality is too weak for a reliable brief. "
+                                        "Add the exact company URL, country, or legal entity name and retry."
+                                    )
+                                    st.info(
+                                        f"Quality score: {best_evidence_seen['score']} | Trusted sources: {best_evidence_seen['trusted_hits']} | "
+                                        f"Unique domains: {best_evidence_seen['unique_domains']} | "
+                                        f"Startup relevance hits: {best_evidence_seen['startup_relevance_hits']}"
+                                    )
+                                    if best_evidence_seen.get("reasons"):
+                                        st.caption("Weak areas: " + "; ".join(best_evidence_seen["reasons"]))
+                                    return
 
                             status.update(label="Unable to generate a stable brief.", state="error")
                             details = run.get("attempt_errors", [])
@@ -3365,6 +3386,12 @@ def main() -> None:
                         st.session_state["search_results"] = best_candidate["search_results"]
                         st.session_state["evidence_quality"] = best_candidate["evidence_quality"]
                         st.session_state["low_confidence"] = bool(best_candidate["low_confidence"])
+                        if (
+                            reliability_mode == "Strict"
+                            and st.session_state["low_confidence"]
+                            and not st.session_state["evidence_quality"].get("enough", False)
+                        ):
+                            st.session_state["strict_low_signal"] = True
 
                         if len(best_candidate["search_results"]) < 4:
                             st.info("Limited public signal found; brief quality may be lower. Try adding exact website URL.")
