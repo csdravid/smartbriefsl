@@ -9,7 +9,9 @@ import importlib.metadata
 from html import escape
 from pathlib import Path
 from typing import List, Dict, Any
+from urllib.error import URLError, HTTPError
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 import streamlit as st
@@ -1545,6 +1547,76 @@ def _canonicalize_url(raw_url: str) -> str:
     return urlunparse(("https", host, path, "", query, ""))
 
 
+def _fetch_page_text(url: str, timeout_s: float = 3.5) -> tuple[str, str]:
+    """Fetch page HTML and return (title, cleaned text)."""
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; SmartBriefsBot/1.0)"})
+    try:
+        with urlopen(req, timeout=timeout_s) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+    except (HTTPError, URLError, TimeoutError, ValueError):
+        return "", ""
+    except Exception:
+        return "", ""
+
+    title_match = re.search(r"(?is)<title[^>]*>(.*?)</title>", raw)
+    title = re.sub(r"\s+", " ", (title_match.group(1) if title_match else "")).strip()
+
+    # Strip scripts/styles/tags quickly; keep plain text for signal extraction.
+    text = re.sub(r"(?is)<script.*?>.*?</script>", " ", raw)
+    text = re.sub(r"(?is)<style.*?>.*?</style>", " ", text)
+    text = re.sub(r"(?is)<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return title, text[:2500]
+
+
+def _fallback_from_preferred_domain(preferred_url: str, startup_tokens: List[str]) -> List[Dict[str, Any]]:
+    """
+    Build search evidence directly from the preferred domain when third-party search is blocked.
+    """
+    parsed = urlparse(preferred_url)
+    domain = parsed.netloc.lower().replace("www.", "")
+    root = f"https://{domain}"
+    candidate_urls = [
+        root,
+        f"{root}/about",
+        f"{root}/team",
+        f"{root}/leadership",
+        f"{root}/founders",
+        f"{root}/news",
+        f"{root}/press",
+        f"{root}/investors",
+        f"{root}/funding",
+    ]
+
+    rows: List[Dict[str, Any]] = []
+    seen = set()
+
+    for url in candidate_urls:
+        canon = _canonicalize_url(url)
+        if not canon or canon in seen:
+            continue
+        seen.add(canon)
+        title, body = _fetch_page_text(canon)
+        if not body:
+            continue
+        blob = f"{title} {body} {canon}".lower()
+        name_match = any(tok in blob for tok in startup_tokens) if startup_tokens else True
+        if not name_match:
+            continue
+        rows.append(
+            {
+                "title": title or f"{domain} page",
+                "body": body[:700],
+                "href": canon,
+                "name_match": True,
+                "synthetic": False,
+            }
+        )
+        if len(rows) >= 10:
+            break
+    return rows
+
+
 def infer_startup_name_from_domain(domain: str) -> str:
     host = (domain or "").lower().strip()
     if host.startswith("www."):
@@ -2297,6 +2369,18 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
 
     if len(cleaned_results) > collect_cap:
         cleaned_results = cleaned_results[:collect_cap]
+
+    # Deterministic fallback: build evidence directly from preferred domain if search providers are blocked.
+    if preferred_url and len(cleaned_results) < 4:
+        direct_rows = _fallback_from_preferred_domain(preferred_url, startup_tokens)
+        for r in direct_rows:
+            canon = _canonicalize_url(r.get("href", ""))
+            if not canon or canon in seen_urls:
+                continue
+            seen_urls.add(canon)
+            cleaned_results.append(r)
+            if len(cleaned_results) >= collect_cap:
+                break
 
     # If everything failed, surface meaningful diagnostics instead of silent "no signal."
     if not cleaned_results and search_errors:
