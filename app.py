@@ -1617,6 +1617,23 @@ def _fallback_from_preferred_domain(preferred_url: str, startup_tokens: List[str
     return rows
 
 
+def _guess_preferred_url_from_name(startup_name: str) -> str | None:
+    """
+    Infer likely company domain from startup name when search providers fail.
+    """
+    base = re.sub(r"[^a-z0-9]+", "", (startup_name or "").lower())
+    if len(base) < 3:
+        return None
+    tlds = [".com", ".ch", ".io", ".ai", ".co", ".net", ".tech"]
+    for tld in tlds:
+        candidate = f"https://{base}{tld}"
+        title, body = _fetch_page_text(candidate, timeout_s=2.5)
+        blob = f"{title} {body}".lower()
+        if body and (base in blob or (startup_name or "").lower()[:8] in blob):
+            return candidate
+    return None
+
+
 def infer_startup_name_from_domain(domain: str) -> str:
     host = (domain or "").lower().strip()
     if host.startswith("www."):
@@ -1741,48 +1758,11 @@ def sanitize_exception_for_display(err_text: str) -> str:
 
 
 def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | None = None) -> List[Dict[str, Any]]:
-    legal_suffixes = {
-        "sa", "ag", "inc", "llc", "ltd", "gmbh", "sarl", "bv", "nv", "oy", "ab", "spa", "plc", "corp", "co"
-    }
-
     query_clean = (query or "").strip()
-    core_query = re.sub(
-        r"\b(?:sa|ag|inc|llc|ltd|gmbh|sarl|bv|nv|oy|ab|spa|plc|corp|co)\b",
-        " ",
-        query_clean,
-        flags=re.IGNORECASE,
-    )
-    core_query = re.sub(r"\s+", " ", core_query).strip() or query_clean
-
-    trusted_domains = [
-        "startupticker.ch",
-        "venturelab.swiss",
-        "startup.ch",
-        "linkedin.com",
-        "techcrunch.com",
-        "crunchbase.com",
-        "pitchbook.com",
-        "dealroom.co",
-        "tracxn.com",
-        "sifted.eu",
-        "eu-startups.com",
-        "forbes.com",
-        "reuters.com",
-        "bloomberg.com",
-    ]
-    generic_query_tokens = {
-        "company", "startup", "official", "website", "about", "team", "group", "global"
-    }
-    startup_tokens = []
-    for t in re.split(r"[^a-z0-9]+", core_query.lower()):
-        if len(t) >= 3 and t not in legal_suffixes and t not in generic_query_tokens:
-            startup_tokens.append(t)
-    if not startup_tokens:
-        startup_tokens = [
-            t
-            for t in re.split(r"[^a-z0-9]+", query_clean.lower())
-            if len(t) >= 3 and t not in generic_query_tokens
-        ]
+    if not query_clean:
+        return []
+    core_query = re.sub(r"\s+", " ", query_clean).strip()
+    startup_tokens = [t for t in re.split(r"[^a-z0-9]+", core_query.lower()) if len(t) >= 3]
 
     preferred_domain = ""
     preferred_canonical = ""
@@ -1791,71 +1771,38 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
         preferred_domain = parsed_preferred.netloc.lower().replace("www.", "")
         preferred_canonical = _canonicalize_url(preferred_url)
 
+    trusted_domains = [
+        "startupticker.ch", "venturelab.swiss", "startup.ch", "linkedin.com",
+        "crunchbase.com", "pitchbook.com", "sifted.eu", "eu-startups.com",
+    ]
     blocked_nsfw_terms = [
         "porn", "porno", "xxx", "adult", "sex", "xvideos", "xnxx", "pornhub", "redtube",
         "youporn", "brazzers", "onlyfans", "escort", "cams", "camgirl",
     ]
-    business_terms = [
-        "company", "startup", "funding", "investor", "series", "raised", "valuation",
-        "ceo", "cto", "cfo", "coo", "cmo", "cpo", "team", "product", "competitor",
-        "platform", "technology", "headquarters", "profile",
-    ]
-    generic_domains = {
-        "google.com", "bing.com", "yahoo.com", "duckduckgo.com", "wikipedia.org",
-        "facebook.com", "instagram.com", "youtube.com", "x.com", "twitter.com",
-    }
 
     enriched_queries = [
-        query_clean,
+        core_query,
         f"\"{core_query}\" startup",
         f"\"{core_query}\" founders leadership team",
-        f"\"{core_query}\" CEO CTO CFO COO CMO CPO management",
-        f"\"{core_query}\" funding investors valuation",
-        f"\"{core_query}\" deep tech startup",
-        f"\"{core_query}\" headquarters US Europe footprint",
-        f"\"{core_query}\" technology patents competitors alternatives",
-        f"site:startupticker.ch \"{core_query}\"",
-        f"site:venturelab.swiss \"{core_query}\"",
+        f"\"{core_query}\" CEO CTO CFO COO CMO CPO",
+        f"\"{core_query}\" funding investors",
+        f"\"{core_query}\" competitors alternatives",
     ]
     if preferred_domain:
         enriched_queries.extend(
             [
                 f"site:{preferred_domain} {core_query}",
-                f"\"{preferred_domain}\" {core_query} startup",
+                f"site:{preferred_domain} team",
+                f"site:{preferred_domain} funding investors",
             ]
         )
-        if preferred_domain.endswith(".com"):
-            alt_ch = preferred_domain[:-4] + ".ch"
-            enriched_queries.extend(
-                [
-                    f"site:{alt_ch} {core_query}",
-                    f"\"{core_query}\" site:{alt_ch} team leadership funding",
-                ]
-            )
 
     cleaned_results: List[Dict[str, Any]] = []
-    seen_urls = set()
-    search_errors: List[str] = []
-    collect_cap = max(max_results * 4, 60)
-    search_started_at = time.time()
-    search_budget_s = 45.0
+    seen_urls: set[str] = set()
 
     def fetch_with_fallback(ddgs_client: DDGS, q: str, limit: int) -> List[Dict[str, Any]]:
-        """
-        Try multiple DDGS backends and regions to avoid environment-specific outages.
-        """
-        backend_errors: List[str] = []
-        combos = [
-            ("lite", "wt-wt"),
-            ("html", "wt-wt"),
-            ("lite", "ch-de"),
-            ("lite", "us-en"),
-            ("auto", "wt-wt"),
-        ]
+        combos = [("lite", "wt-wt"), ("html", "wt-wt"), ("auto", "wt-wt"), ("lite", "us-en"), ("lite", "ch-de")]
         for backend, region in combos:
-            if (time.time() - search_started_at) > search_budget_s:
-                backend_errors.append("search-budget-exceeded")
-                break
             try:
                 rows = list(
                     ddgs_client.text(
@@ -1868,529 +1815,111 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                 )
                 if rows:
                     return rows
-                backend_errors.append(f"{backend}/{region}: empty")
             except TypeError:
-                # Older duckduckgo-search versions or region mismatch; fallback call.
                 try:
                     rows = list(ddgs_client.text(q, max_results=limit, backend=backend))
                     if rows:
                         return rows
-                    backend_errors.append(f"{backend}/{region}: empty-fallback")
                 except Exception:
-                    backend_errors.append(f"{backend}/{region}: fallback failed")
-                continue
+                    continue
             except Exception:
-                backend_errors.append(f"{backend}/{region}: request failed")
                 continue
-        if backend_errors:
-            search_errors.append(f"Query '{q}' failed across backends ({'; '.join(backend_errors[:8])})")
         return []
 
     def fetch_via_ddg_html(q: str, limit: int) -> List[Dict[str, Any]]:
-        """
-        Secondary fallback: query DuckDuckGo HTML endpoint directly when DDGS fails.
-        """
         try:
-            url = f"https://duckduckgo.com/html/?q={quote_plus(q)}"
-            req = Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; SmartBriefsBot/1.0)"})
-            with urlopen(req, timeout=8.0) as resp:
+            req = Request(
+                f"https://duckduckgo.com/html/?q={quote_plus(q)}",
+                headers={"User-Agent": "Mozilla/5.0 (compatible; SmartBriefsBot/1.0)"},
+            )
+            with urlopen(req, timeout=7.0) as resp:
                 html = resp.read().decode("utf-8", errors="ignore")
         except Exception:
             return []
-
         rows: List[Dict[str, Any]] = []
         seen_links = set()
-
-        link_candidates = re.findall(
-            r'(?is)<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
-            html,
-        )
-        if not link_candidates:
-            link_candidates = re.findall(r'(?is)<a[^>]+href="([^"]+uddg=[^"]+)"[^>]*>(.*?)</a>', html)
-
-        for href_raw, title_html in link_candidates:
+        matches = re.findall(r'(?is)<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html)
+        for href_raw, title_html in matches:
             href = href_raw
             if "uddg=" in href:
                 try:
                     qs = parse_qs(urlparse(href).query)
-                    uddg = qs.get("uddg", [""])[0]
-                    if uddg:
-                        href = unquote(uddg)
+                    href = unquote(qs.get("uddg", [""])[0] or href)
                 except Exception:
                     pass
             href = (href or "").strip()
-            if not href or href in seen_links:
-                continue
-            if not href.startswith("http"):
+            if not href or not href.startswith("http") or href in seen_links:
                 continue
             seen_links.add(href)
             title = re.sub(r"(?is)<[^>]+>", " ", title_html or "")
             title = re.sub(r"\s+", " ", title).strip()
-            rows.append(
-                {
-                    "title": title,
-                    "body": "",
-                    "href": href,
-                    "name_match": True,
-                    "synthetic": False,
-                }
-            )
-            if len(rows) >= max(3, limit):
+            rows.append({"title": title, "body": "", "href": href, "name_match": True, "synthetic": False})
+            if len(rows) >= limit:
                 break
         return rows
 
-    def fetch_exhaustive(ddgs_client: DDGS, q: str, limit: int) -> List[Dict[str, Any]]:
-        """Slower but broader fallback used only when signal is weak."""
-        backend_errors: List[str] = []
-        combos = [
-            ("lite", "wt-wt"),
-            ("html", "wt-wt"),
-            ("auto", "wt-wt"),
-            ("lite", "us-en"),
-            ("html", "us-en"),
-            ("auto", "us-en"),
-            ("lite", "ch-de"),
-            ("html", "ch-de"),
-            ("auto", "ch-de"),
-            ("lite", "uk-en"),
-        ]
-        for backend, region in combos:
-            if (time.time() - search_started_at) > search_budget_s:
-                backend_errors.append("search-budget-exceeded")
-                break
-            try:
-                rows = list(
-                    ddgs_client.text(
-                        q,
-                        max_results=limit,
-                        backend=backend,
-                        region=region,
-                        safesearch="strict",
-                    )
-                )
-                if rows:
-                    return rows
-                backend_errors.append(f"{backend}/{region}: empty")
-            except TypeError:
-                try:
-                    rows = list(ddgs_client.text(q, max_results=limit, backend=backend))
-                    if rows:
-                        return rows
-                    backend_errors.append(f"{backend}/{region}: empty-fallback")
-                except Exception:
-                    backend_errors.append(f"{backend}/{region}: fallback failed")
-            except Exception:
-                backend_errors.append(f"{backend}/{region}: request failed")
-        if backend_errors:
-            search_errors.append(f"Exhaustive query '{q}' failed ({'; '.join(backend_errors[:8])})")
-        rows = fetch_via_ddg_html(q, limit)
-        if rows:
-            return rows
-        return []
-
-    with DDGS() as ddgs:
-        per_query = max(4, max_results // max(1, len(enriched_queries)))
-        empty_query_streak = 0
-        for q in enriched_queries:
-            if (time.time() - search_started_at) > search_budget_s:
-                search_errors.append("Search budget exceeded during enriched query phase.")
-                break
-            try:
-                results = fetch_with_fallback(ddgs, q, per_query)
-                if not results:
-                    results = fetch_via_ddg_html(q, per_query)
-                if not results:
-                    empty_query_streak += 1
-                    if empty_query_streak >= 4 and not cleaned_results:
-                        search_errors.append("Too many consecutive empty enriched queries.")
-                        break
-                else:
-                    empty_query_streak = 0
-                for r in results:
-                    href = (r.get("href") or r.get("url") or "").strip()
-                    if not href:
-                        continue
-                    lower_href = href.lower()
-                    domain = urlparse(lower_href).netloc.lower().replace("www.", "")
-                    text_blob = (
-                        f"{r.get('title', '')} {r.get('body') or r.get('snippet') or ''} {lower_href}"
-                    ).lower()
-                    name_match = any(tok in text_blob for tok in startup_tokens) if startup_tokens else True
-                    has_business_signal = any(term in text_blob for term in business_terms)
-                    if any(skip in lower_href for skip in ["login", "password"]):
-                        continue
-                    if any(term in text_blob for term in blocked_nsfw_terms):
-                        continue
-                    canonical_href = _canonicalize_url(href)
-                    if canonical_href in seen_urls:
-                        continue
-                    seen_urls.add(canonical_href)
-                    cleaned_results.append(
-                        {
-                            "title": r.get("title", "").strip(),
-                            "body": (r.get("body") or r.get("snippet") or "").strip(),
-                            "href": href,
-                            "name_match": name_match,
-                            "synthetic": False,
-                        }
-                    )
-                    if len(cleaned_results) >= collect_cap:
-                        break
-            except Exception:
-                search_errors.append(f"Query loop failed: '{q}'")
+    def _append(rows: List[Dict[str, Any]]) -> None:
+        for r in rows:
+            href = (r.get("href") or r.get("url") or "").strip()
+            if not href:
                 continue
-            if len(cleaned_results) >= collect_cap:
+            canonical_href = _canonicalize_url(href)
+            if not canonical_href or canonical_href in seen_urls:
+                continue
+            text_blob = f"{r.get('title', '')} {r.get('body') or r.get('snippet') or ''} {href}".lower()
+            if any(term in text_blob for term in blocked_nsfw_terms):
+                continue
+            seen_urls.add(canonical_href)
+            cleaned_results.append(
+                {
+                    "title": (r.get("title") or "").strip(),
+                    "body": (r.get("body") or r.get("snippet") or "").strip(),
+                    "href": href,
+                    "name_match": any(tok in text_blob for tok in startup_tokens) if startup_tokens else True,
+                    "synthetic": False,
+                }
+            )
+            if len(cleaned_results) >= max(max_results * 2, 50):
                 break
 
-        # Fallback: if targeted queries are sparse/rate-limited, do a broad pass.
-        if len(cleaned_results) < 6:
-            fallback_queries = [query, f"{query} company", f"{query} startup"]
-            for fq in fallback_queries:
-                if (time.time() - search_started_at) > search_budget_s:
-                    search_errors.append("Search budget exceeded during fallback query phase.")
-                    break
-                try:
-                    results = fetch_with_fallback(ddgs, fq, 10)
-                    if not results:
-                        results = fetch_via_ddg_html(fq, 10)
-                    for r in results:
-                        href = (r.get("href") or r.get("url") or "").strip()
-                        canonical_href = _canonicalize_url(href)
-                        if not href or canonical_href in seen_urls:
-                            continue
-                        lower_href = href.lower()
-                        domain = urlparse(lower_href).netloc.lower().replace("www.", "")
-                        text_blob = (
-                            f"{r.get('title', '')} {r.get('body') or r.get('snippet') or ''} {lower_href}"
-                        ).lower()
-                        name_match = any(tok in text_blob for tok in startup_tokens) if startup_tokens else True
-                        has_business_signal = any(term in text_blob for term in business_terms)
-                        if any(skip in lower_href for skip in ["login", "password"]):
-                            continue
-                        if any(term in text_blob for term in blocked_nsfw_terms):
-                            continue
-                        seen_urls.add(canonical_href)
-                        cleaned_results.append(
-                            {
-                                "title": r.get("title", "").strip(),
-                                "body": (r.get("body") or r.get("snippet") or "").strip(),
-                                "href": href,
-                                "name_match": name_match,
-                                "synthetic": False,
-                            }
-                        )
-                        if len(cleaned_results) >= collect_cap:
-                            break
-                except Exception:
-                    search_errors.append(f"Fallback query loop failed: '{fq}'")
-                    continue
-                if len(cleaned_results) >= collect_cap:
-                    break
+    per_query = max(6, max_results // 3)
+    with DDGS() as ddgs:
+        for q in enriched_queries:
+            rows = fetch_with_fallback(ddgs, q, per_query)
+            if not rows:
+                rows = fetch_via_ddg_html(q, per_query)
+            _append(rows)
+            if len(cleaned_results) >= max_results:
+                break
 
-        # Entity discovery pass: when relevance is very low, identify probable official domain first.
-        relevance_hits = 0
-        for r in cleaned_results:
-            txt = f"{r.get('title', '')} {r.get('body', '')} {r.get('href', '')}".lower()
-            if any(tok in txt for tok in startup_tokens):
-                relevance_hits += 1
-        if relevance_hits < 3 and not preferred_domain:
-            discovery_queries = [
-                f"\"{core_query}\" official website",
-                f"\"{core_query}\" company",
-                f"\"{core_query}\" startup",
-                f"\"{core_query}\" linkedin",
-            ]
-            candidate_domains: List[str] = []
-            for dq in discovery_queries:
-                if (time.time() - search_started_at) > search_budget_s:
-                    search_errors.append("Search budget exceeded during entity discovery phase.")
-                    break
-                try:
-                    dres = fetch_with_fallback(ddgs, dq, 8)
-                    if not dres:
-                        dres = fetch_via_ddg_html(dq, 8)
-                except Exception:
-                    continue
-                for r in dres:
-                    href = (r.get("href") or r.get("url") or "").strip()
-                    if not href:
-                        continue
-                    dom = urlparse(href).netloc.lower().replace("www.", "")
-                    if not dom or any(gd in dom for gd in generic_domains):
-                        continue
-                    if dom not in candidate_domains:
-                        candidate_domains.append(dom)
-                if len(candidate_domains) >= 2:
-                    break
-
-            for dom in candidate_domains[:2]:
-                for q in (f"site:{dom} {core_query}", f"site:{dom} about", f"site:{dom} team"):
-                    if (time.time() - search_started_at) > search_budget_s:
-                        search_errors.append("Search budget exceeded during domain-focused pass.")
-                        break
-                    try:
-                        dres = fetch_with_fallback(ddgs, q, 8)
-                        if not dres:
-                            dres = fetch_via_ddg_html(q, 8)
-                    except Exception:
-                        continue
-                    for r in dres:
-                        href = (r.get("href") or r.get("url") or "").strip()
-                        canonical_href = _canonicalize_url(href)
-                        if not href or canonical_href in seen_urls:
-                            continue
-                        lower_href = href.lower()
-                        domain = urlparse(lower_href).netloc.lower().replace("www.", "")
-                        text_blob = (
-                            f"{r.get('title', '')} {r.get('body') or r.get('snippet') or ''} {lower_href}"
-                        ).lower()
-                        has_business_signal = any(term in text_blob for term in business_terms)
-                        if any(skip in lower_href for skip in ["login", "password"]):
-                            continue
-                        if any(term in text_blob for term in blocked_nsfw_terms):
-                            continue
-                        seen_urls.add(canonical_href)
-                        cleaned_results.append(
-                            {
-                                "title": r.get("title", "").strip(),
-                                "body": (r.get("body") or r.get("snippet") or "").strip(),
-                                "href": href,
-                                "name_match": any(tok in text_blob for tok in startup_tokens) if startup_tokens else True,
-                                "synthetic": False,
-                            }
-                        )
-                        if len(cleaned_results) >= collect_cap:
-                            break
-                    if len(cleaned_results) >= collect_cap:
-                        break
-                if len(cleaned_results) >= collect_cap:
-                    break
-
-        # Focused enrichment pass when source depth is still weak.
-        if len(cleaned_results) < max(10, max_results):
-            enrich_queries = [
-                f"\"{core_query}\" CEO",
-                f"\"{core_query}\" CTO",
-                f"\"{core_query}\" founders",
-                f"\"{core_query}\" funding",
-                f"\"{core_query}\" investors",
-                f"site:linkedin.com \"{core_query}\" company",
-                f"site:crunchbase.com \"{core_query}\"",
-                f"site:startupticker.ch \"{core_query}\"",
-                f"site:startup.ch \"{core_query}\"",
-            ]
-            if preferred_domain:
-                enrich_queries.append(f"site:{preferred_domain} team leadership")
-                enrich_queries.append(f"site:{preferred_domain} funding investors")
-            for eq in enrich_queries:
-                if (time.time() - search_started_at) > search_budget_s:
-                    search_errors.append("Search budget exceeded during focused enrichment phase.")
-                    break
-                try:
-                    rows = fetch_with_fallback(ddgs, eq, 8)
-                    if not rows:
-                        rows = fetch_via_ddg_html(eq, 8)
-                except Exception:
-                    continue
-                for r in rows:
-                    href = (r.get("href") or r.get("url") or "").strip()
-                    canonical_href = _canonicalize_url(href)
-                    if not href or canonical_href in seen_urls:
-                        continue
-                    lower_href = href.lower()
-                    domain = urlparse(lower_href).netloc.lower().replace("www.", "")
-                    text_blob = (
-                        f"{r.get('title', '')} {r.get('body') or r.get('snippet') or ''} {lower_href}"
-                    ).lower()
-                    has_business_signal = any(term in text_blob for term in business_terms)
-                    if any(skip in lower_href for skip in ["login", "password"]):
-                        continue
-                    if any(term in text_blob for term in blocked_nsfw_terms):
-                        continue
-                    seen_urls.add(canonical_href)
-                    cleaned_results.append(
-                        {
-                            "title": r.get("title", "").strip(),
-                            "body": (r.get("body") or r.get("snippet") or "").strip(),
-                            "href": href,
-                            "name_match": any(tok in text_blob for tok in startup_tokens) if startup_tokens else True,
-                            "synthetic": False,
-                        }
-                    )
-                    if len(cleaned_results) >= collect_cap:
-                        break
-                if len(cleaned_results) >= collect_cap:
-                    break
-
-        # Domain-focused rescue pass even when relevance is non-zero:
-        # helps recover leadership/funding pages from already-found company domains.
-        combined_blob = " ".join(
-            f"{r.get('title', '')} {r.get('body', '')} {r.get('href', '')}".lower()
-            for r in cleaned_results
-        )
-        leadership_signal = any(k in combined_blob for k in ["founder", "co-founder", "ceo", "cto", "cfo", "coo", "cmo", "cpo", "leadership"])
-        funding_signal = any(k in combined_blob for k in ["funding", "investor", "series", "raised", "valuation", "seed"])
-        if (
-            len(cleaned_results) < 8 or not leadership_signal or not funding_signal
-        ) and (time.time() - search_started_at) < (search_budget_s * 0.75):
-            domain_freq: Dict[str, int] = {}
-            for r in cleaned_results:
-                dom = urlparse((r.get("href") or "")).netloc.lower().replace("www.", "")
-                if not dom or any(gd in dom for gd in generic_domains):
-                    continue
-                domain_freq[dom] = domain_freq.get(dom, 0) + 1
-            top_domains = [d for d, _ in sorted(domain_freq.items(), key=lambda kv: kv[1], reverse=True)[:3]]
-            for dom in top_domains:
-                focused_queries = [
-                    f"site:{dom} {core_query} team leadership founders",
-                    f"site:{dom} {core_query} funding investors series seed",
-                    f"site:{dom} {core_query} press release",
-                ]
-                for fq in focused_queries:
-                    if (time.time() - search_started_at) > search_budget_s:
-                        search_errors.append("Search budget exceeded during domain-rescue phase.")
-                        break
-                    try:
-                        rows = fetch_with_fallback(ddgs, fq, 8)
-                    except Exception:
-                        continue
-                    for r in rows:
-                        href = (r.get("href") or r.get("url") or "").strip()
-                        canonical_href = _canonicalize_url(href)
-                        if not href or canonical_href in seen_urls:
-                            continue
-                        lower_href = href.lower()
-                        domain = urlparse(lower_href).netloc.lower().replace("www.", "")
-                        text_blob = (
-                            f"{r.get('title', '')} {r.get('body') or r.get('snippet') or ''} {lower_href}"
-                        ).lower()
-                        has_business_signal = any(term in text_blob for term in business_terms)
-                        if any(skip in lower_href for skip in ["login", "password"]):
-                            continue
-                        if any(term in text_blob for term in blocked_nsfw_terms):
-                            continue
-                        seen_urls.add(canonical_href)
-                        cleaned_results.append(
-                            {
-                                "title": r.get("title", "").strip(),
-                                "body": (r.get("body") or r.get("snippet") or "").strip(),
-                                "href": href,
-                                "name_match": any(tok in text_blob for tok in startup_tokens) if startup_tokens else True,
-                                "synthetic": False,
-                            }
-                        )
-                        if len(cleaned_results) >= collect_cap:
-                            break
-                    if len(cleaned_results) >= collect_cap:
-                        break
-                if len(cleaned_results) >= collect_cap:
-                    break
-
-        # Final rescue: broaden query shape + backend/region matrix if signal is still weak.
-        if len(cleaned_results) < 6 and (time.time() - search_started_at) < (search_budget_s * 0.92):
-            rescue_queries = [
-                core_query,
-                f"{core_query} founders leadership",
-                f"{core_query} ceo cto cfo",
-                f"{core_query} funding investors series seed",
-                f"{core_query} crunchbase linkedin startup.ch",
-            ]
-            if preferred_domain:
-                rescue_queries.extend(
-                    [
-                        f"site:{preferred_domain} team",
-                        f"site:{preferred_domain} leadership",
-                        f"site:{preferred_domain} investors funding",
-                    ]
-                )
-            for rq in rescue_queries:
-                if (time.time() - search_started_at) > search_budget_s:
-                    search_errors.append("Search budget exceeded during exhaustive rescue phase.")
-                    break
-                try:
-                    rows = fetch_exhaustive(ddgs, rq, 10)
-                except Exception:
-                    continue
-                for r in rows:
-                    href = (r.get("href") or r.get("url") or "").strip()
-                    canonical_href = _canonicalize_url(href)
-                    if not href or canonical_href in seen_urls:
-                        continue
-                    lower_href = href.lower()
-                    domain = urlparse(lower_href).netloc.lower().replace("www.", "")
-                    text_blob = (
-                        f"{r.get('title', '')} {r.get('body') or r.get('snippet') or ''} {lower_href}"
-                    ).lower()
-                    has_business_signal = any(term in text_blob for term in business_terms)
-                    off_topic_hit = any(term in text_blob for term in off_topic_terms) or any(
-                        od in domain for od in off_topic_domains
-                    )
-                    if any(skip in lower_href for skip in ["login", "password"]):
-                        continue
-                    if any(term in text_blob for term in blocked_nsfw_terms):
-                        continue
-                    if off_topic_hit and not has_business_signal:
-                        continue
-                    seen_urls.add(canonical_href)
-                    cleaned_results.append(
-                        {
-                            "title": r.get("title", "").strip(),
-                            "body": (r.get("body") or r.get("snippet") or "").strip(),
-                            "href": href,
-                            "name_match": any(tok in text_blob for tok in startup_tokens) if startup_tokens else True,
-                            "synthetic": False,
-                        }
-                    )
-                    if len(cleaned_results) >= collect_cap:
-                        break
-                if len(cleaned_results) >= collect_cap:
-                    break
-
-    keywords = [
-        "founder", "ceo", "cto", "cfo", "coo", "cmo", "cpo", "leadership",
-        "management", "co-founder", "raised", "series", "funding", "acquired",
-        "acquisition", "review", "alternative", "competitor",
-    ]
+    if preferred_url and len(cleaned_results) < 4:
+        _append(_fallback_from_preferred_domain(preferred_url, startup_tokens))
+    if not preferred_url and len(cleaned_results) < 4:
+        guessed = _guess_preferred_url_from_name(core_query)
+        if guessed:
+            _append(_fallback_from_preferred_domain(guessed, startup_tokens))
 
     def score_result(r: Dict[str, Any]) -> int:
         text = (r.get("title", "") + " " + r.get("body", "")).lower()
-        score = sum(kw in text for kw in keywords)
         href = (r.get("href", "") or "").lower()
         domain = urlparse(href).netloc.lower()
-
+        score = 0
         if any(td in domain for td in trusted_domains):
+            score += 10
+        if any(tok in text or tok in domain for tok in startup_tokens):
             score += 8
-        if "startupticker.ch" in domain:
-            score += 4
-        if "venturelab.swiss" in domain:
-            score += 4
-
-        # Favor likely official or tightly relevant startup pages.
-        if any(tok in domain for tok in startup_tokens):
-            score += 5
-        if any(tok in text for tok in startup_tokens):
-            score += 3
         if r.get("name_match"):
-            score += 12
+            score += 6
         if preferred_domain and preferred_domain in domain:
             score += 20
         if preferred_canonical and _canonicalize_url(href) == preferred_canonical:
             score += 30
-        # Penalize low-signal utility pages.
-        if any(skip in href for skip in ["login", "signup", "privacy", "terms"]):
-            score -= 3
         return score
 
     cleaned_results.sort(key=score_result, reverse=True)
 
-    # Keep output anchored to the startup entity first.
-    name_matched = [r for r in cleaned_results if r.get("name_match")]
-    if len(name_matched) >= 3:
-        cleaned_results = name_matched + [r for r in cleaned_results if not r.get("name_match")]
-
-    # Ensure user-provided URL is represented in sources.
     if preferred_url:
-        has_preferred = any((_canonicalize_url(r.get("href", "")) == preferred_canonical) for r in cleaned_results)
+        has_preferred = any(_canonicalize_url(r.get("href", "")) == preferred_canonical for r in cleaned_results)
         if not has_preferred:
             cleaned_results.insert(
                 0,
@@ -2403,31 +1932,7 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                 },
             )
 
-    if len(cleaned_results) > collect_cap:
-        cleaned_results = cleaned_results[:collect_cap]
-
-    # Deterministic fallback: build evidence directly from preferred domain if search providers are blocked.
-    if preferred_url and len(cleaned_results) < 4:
-        direct_rows = _fallback_from_preferred_domain(preferred_url, startup_tokens)
-        for r in direct_rows:
-            canon = _canonicalize_url(r.get("href", ""))
-            if not canon or canon in seen_urls:
-                continue
-            seen_urls.add(canon)
-            cleaned_results.append(r)
-            if len(cleaned_results) >= collect_cap:
-                break
-
-    # If everything failed, surface meaningful diagnostics instead of silent "no signal."
-    if not cleaned_results and search_errors:
-        brief_errors = " | ".join(search_errors[:3])
-        raise RuntimeError(
-            "Web search failed on this deployment environment. "
-            "This is usually dependency/network/runtime related. "
-            f"Details: {brief_errors}"
-        )
-
-    return cleaned_results
+    return cleaned_results[: max_results + 6]
 
 
 def prepare_llm_context(
@@ -3357,23 +2862,17 @@ def generate_best_of_multiple_attempts(
     preferred_url: str | None = None,
     attempt_start_index: int = 0,
 ) -> Dict[str, Any]:
-    """
-    Run multiple search + generation attempts and return the best candidate.
-    This reduces one-click variance when public search results fluctuate.
-    """
+    """Run a few attempts and pick the strongest draft."""
     best_candidate: Dict[str, Any] | None = None
     best_rank = -10_000
     no_signal_attempts = 0
     attempt_errors: List[str] = []
     best_evidence_seen: Dict[str, Any] | None = None
     attempt_stats: List[Dict[str, Any]] = []
-    consecutive_search_failures = 0
 
     for idx in range(max(1, attempts)):
-        # Backoff between attempts helps on hosted environments where
-        # search providers may temporarily throttle repeated requests.
         if idx > 0:
-            time.sleep(min(1.2, 0.5 * idx))
+            time.sleep(min(0.8, 0.35 * idx))
 
         attempt_info: Dict[str, Any] = {
             "attempt": attempt_start_index + idx + 1,
@@ -3393,26 +2892,18 @@ def generate_best_of_multiple_attempts(
             attempt_info["status"] = "search_error"
             attempt_info["error"] = str(e)
             attempt_stats.append(attempt_info)
-            consecutive_search_failures += 1
-            if best_candidate and consecutive_search_failures >= 1:
-                break
             continue
 
         if not results:
             no_signal_attempts += 1
             attempt_info["status"] = "no_signal"
             attempt_stats.append(attempt_info)
-            consecutive_search_failures += 1
-            if best_candidate and consecutive_search_failures >= 1:
-                break
             continue
-        consecutive_search_failures = 0
 
         real_results = [r for r in results if not r.get("synthetic", False)]
         attempt_info["results"] = len(results)
         attempt_info["real_results"] = len(real_results)
 
-        # If only synthetic/pinned URL exists, treat as a blocked/empty search attempt.
         if len(real_results) == 0:
             no_signal_attempts += 1
             attempt_info["status"] = "search_blocked_or_empty"
@@ -3467,8 +2958,8 @@ def generate_best_of_multiple_attempts(
             best_rank = rank
             best_candidate = candidate
 
-        # Simplified mode: first valid candidate wins.
-        break
+        if brief_score >= 12 and len(real_results) >= 5:
+            break
 
     return {
         "best_candidate": best_candidate,
@@ -3745,7 +3236,7 @@ def main() -> None:
                     run = generate_best_of_multiple_attempts(
                         startup_name=startup_name,
                         reliability_mode=reliability_mode,
-                        attempts=1,
+                        attempts=3,
                         preferred_url=preferred_url,
                         attempt_start_index=0,
                     )
