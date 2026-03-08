@@ -1727,6 +1727,10 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
         "porn", "porno", "xxx", "adult", "sex", "xvideos", "xnxx", "pornhub", "redtube",
         "youporn", "brazzers", "onlyfans", "escort", "cams", "camgirl",
     ]
+    generic_domains = {
+        "google.com", "bing.com", "yahoo.com", "duckduckgo.com", "wikipedia.org",
+        "facebook.com", "instagram.com", "youtube.com", "x.com", "twitter.com",
+    }
 
     enriched_queries = [
         query_clean,
@@ -1754,31 +1758,39 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
 
     def fetch_with_fallback(ddgs_client: DDGS, q: str, limit: int) -> List[Dict[str, Any]]:
         """
-        Try multiple DDGS backends to avoid backend-specific outages.
+        Try multiple DDGS backends and regions to avoid environment-specific outages.
         """
         backend_errors: List[str] = []
         for backend in ("lite", "html", "auto"):
-            try:
-                return list(
-                    ddgs_client.text(
-                        q,
-                        max_results=limit,
-                        backend=backend,
-                        safesearch="strict",
-                    )
-                )
-            except TypeError:
-                # Older duckduckgo-search versions don't support safesearch keyword.
+            for region in ("wt-wt", "us-en", "ch-de"):
                 try:
-                    return list(ddgs_client.text(q, max_results=limit, backend=backend))
-                except Exception:
-                    backend_errors.append(f"{backend}: incompatible safesearch and fallback failed")
+                    rows = list(
+                        ddgs_client.text(
+                            q,
+                            max_results=limit,
+                            backend=backend,
+                            region=region,
+                            safesearch="strict",
+                        )
+                    )
+                    if rows:
+                        return rows
+                    backend_errors.append(f"{backend}/{region}: empty")
+                except TypeError:
+                    # Older duckduckgo-search versions or region mismatch; fallback call.
+                    try:
+                        rows = list(ddgs_client.text(q, max_results=limit, backend=backend))
+                        if rows:
+                            return rows
+                        backend_errors.append(f"{backend}/{region}: empty-fallback")
+                    except Exception:
+                        backend_errors.append(f"{backend}/{region}: fallback failed")
                     continue
-            except Exception:
-                backend_errors.append(f"{backend}: request failed")
-                continue
+                except Exception:
+                    backend_errors.append(f"{backend}/{region}: request failed")
+                    continue
         if backend_errors:
-            search_errors.append(f"Query '{q}' failed across backends ({'; '.join(backend_errors)})")
+            search_errors.append(f"Query '{q}' failed across backends ({'; '.join(backend_errors[:8])})")
         return []
 
     with DDGS() as ddgs:
@@ -1813,8 +1825,8 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                     )
             except Exception:
                 search_errors.append(f"Query loop failed: '{q}'")
-                continue
-
+                        continue
+                        
         # Fallback: if targeted queries are sparse/rate-limited, do a broad pass.
         if len(cleaned_results) < 6:
             fallback_queries = [query, f"{query} company", f"{query} startup"]
@@ -1834,19 +1846,79 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                             continue
                         if any(term in text_blob for term in blocked_nsfw_terms):
                             continue
+                    seen_urls.add(href)
+                        cleaned_results.append(
+                            {
+                        "title": r.get("title", "").strip(),
+                        "body": (r.get("body") or r.get("snippet") or "").strip(),
+                        "href": href,
+                                "name_match": name_match,
+                                "synthetic": False,
+                            }
+                        )
+            except Exception:
+                    search_errors.append(f"Fallback query loop failed: '{fq}'")
+                continue
+
+        # Entity discovery pass: when relevance is very low, identify probable official domain first.
+        relevance_hits = 0
+        for r in cleaned_results:
+            txt = f"{r.get('title', '')} {r.get('body', '')} {r.get('href', '')}".lower()
+            if any(tok in txt for tok in startup_tokens):
+                relevance_hits += 1
+        if relevance_hits < 3 and not preferred_domain:
+            discovery_queries = [
+                f"\"{core_query}\" official website",
+                f"\"{core_query}\" company",
+                f"\"{core_query}\" startup",
+                f"\"{core_query}\" linkedin",
+            ]
+            candidate_domains: List[str] = []
+            for dq in discovery_queries:
+                try:
+                    dres = fetch_with_fallback(ddgs, dq, 8)
+                except Exception:
+                    continue
+                for r in dres:
+                    href = (r.get("href") or r.get("url") or "").strip()
+                    if not href:
+                        continue
+                    dom = urlparse(href).netloc.lower().replace("www.", "")
+                    if not dom or any(gd in dom for gd in generic_domains):
+                        continue
+                    if dom not in candidate_domains:
+                        candidate_domains.append(dom)
+                if len(candidate_domains) >= 2:
+                    break
+
+            for dom in candidate_domains[:2]:
+                for q in (f"site:{dom} {core_query}", f"site:{dom} about", f"site:{dom} team"):
+                    try:
+                        dres = fetch_with_fallback(ddgs, q, 8)
+                    except Exception:
+                        continue
+                    for r in dres:
+                        href = (r.get("href") or r.get("url") or "").strip()
+                        if not href or href in seen_urls:
+                            continue
+                        lower_href = href.lower()
+                        text_blob = (
+                            f"{r.get('title', '')} {r.get('body') or r.get('snippet') or ''} {lower_href}"
+                        ).lower()
+                        if any(skip in lower_href for skip in ["login", "password"]):
+                            continue
+                        if any(term in text_blob for term in blocked_nsfw_terms):
+                            continue
                         seen_urls.add(href)
                         cleaned_results.append(
                             {
                                 "title": r.get("title", "").strip(),
                                 "body": (r.get("body") or r.get("snippet") or "").strip(),
                                 "href": href,
-                                "name_match": name_match,
+                                "name_match": any(tok in text_blob for tok in startup_tokens) if startup_tokens else True,
                                 "synthetic": False,
                             }
                         )
-                except Exception:
-                    search_errors.append(f"Fallback query loop failed: '{fq}'")
-                    continue
 
     keywords = [
         "founder", "ceo", "cto", "cfo", "coo", "cmo", "cpo", "leadership",
@@ -3177,7 +3249,7 @@ def render_brief(brief_markdown: str, sources: List[Dict[str, Any]]) -> None:
 
     st.markdown("## Section 4 – Live Sources")
     if sources:
-        for r in sources[:7]:
+        for r in sources[:7]: 
             title = r.get("title") or r.get("href") or "Source"
             href = r.get("href", "")
             if href:
@@ -3243,13 +3315,13 @@ def main() -> None:
     init_session_state()
 
     with st.container(border=True):
-        query, generate_clicked = render_header()
+    query, generate_clicked = render_header()
         render_brief_history_panel()
 
-        if generate_clicked:
-            if not query:
-                st.warning("Please enter a startup name (and optional URL) first.")
-            else:
+    if generate_clicked:
+        if not query:
+            st.warning("Please enter a startup name (and optional URL) first.")
+        else:
                 security_msg = validate_user_query_security(query)
                 if security_msg:
                     st.warning(security_msg)
@@ -3261,11 +3333,11 @@ def main() -> None:
                 st.session_state["last_parsed_startup_name"] = startup_name
                 st.session_state["last_preferred_url"] = preferred_url
 
-                st.session_state["brief_markdown"] = None
+            st.session_state["brief_markdown"] = None
                 st.session_state["search_results"] = []
-                st.session_state["error"] = None
+            st.session_state["error"] = None
                 st.session_state["last_query"] = startup_name
-                st.session_state["feedback_submitted"] = False
+            st.session_state["feedback_submitted"] = False
                 st.session_state["low_confidence"] = False
                 st.session_state["strict_low_signal"] = False
                 st.session_state["evidence_quality"] = None
@@ -3322,7 +3394,7 @@ def main() -> None:
 
                         if not best_candidate:
                             if run.get("no_signal_attempts", 0) >= 3:
-                                status.update(label="No public signal found.", state="error")
+                        status.update(label="No public signal found.", state="error")
                                 attempt_stats = run.get("attempt_stats") or []
                                 blocked_like = sum(
                                     1 for a in attempt_stats if a.get("status") in {"search_blocked_or_empty", "no_signal"}
@@ -3336,7 +3408,7 @@ def main() -> None:
                                     st.warning(
                                         "No public signal found. The company might be in stealth. Try adding an exact URL."
                                     )
-                                return
+                        return
 
                             if best_evidence_seen and best_evidence_seen.get("startup_relevance_hits", 0) == 0:
                                 st.session_state["evidence_quality"] = best_evidence_seen
@@ -3387,6 +3459,17 @@ def main() -> None:
                         st.session_state["evidence_quality"] = best_candidate["evidence_quality"]
                         st.session_state["low_confidence"] = bool(best_candidate["low_confidence"])
                         if (
+                            st.session_state["evidence_quality"].get("startup_relevance_hits", 0) == 0
+                            and not preferred_url
+                        ):
+                            status.update(label="No startup-matching signal found.", state="error")
+                            st.warning(
+                                "Search results did not clearly match this startup. "
+                                "Please add the exact website URL (e.g., company.com) and retry."
+                            )
+                            st.session_state["brief_markdown"] = None
+                            return
+                        if (
                             reliability_mode == "Strict"
                             and st.session_state["low_confidence"]
                             and not st.session_state["evidence_quality"].get("enough", False)
@@ -3414,20 +3497,20 @@ def main() -> None:
                         durations.append(elapsed)
                         st.session_state["generation_durations"] = durations[-20:]
                         status.update(label=f"Dossier ready in {elapsed}s.", state="complete")
-                    except Exception as e:
+                except Exception as e:
                         st.session_state["error"] = sanitize_exception_for_display(str(e))
-                        status.update(label="Error while generating dossier.", state="error")
+                    status.update(label="Error while generating dossier.", state="error")
                     finally:
                         loader_placeholder.empty()
                         eta_placeholder.empty()
 
-        if st.session_state.get("error"):
+    if st.session_state.get("error"):
             st.error(
                 "There was an issue generating this brief. This may be due to an API timeout or configuration problem.\n\n"
                 f"Details: {st.session_state['error']}"
             )
 
-        if st.session_state.get("brief_markdown"):
+    if st.session_state.get("brief_markdown"):
             render_brief(st.session_state["brief_markdown"], st.session_state.get("search_results", []))
 
         render_deployment_diagnostics()
