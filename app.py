@@ -1579,6 +1579,11 @@ def parse_startup_input(user_input: str) -> tuple[str, str | None]:
     raw_url = url_match.group(1)
     normalized_url = normalize_url_candidate(raw_url)
     if not normalized_url:
+        # Fallback: tolerate bare domains that regex may miss in messy input.
+        domain_like = re.search(r"\b([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)\b", raw)
+        if domain_like:
+            normalized_url = normalize_url_candidate(domain_like.group(1))
+    if not normalized_url:
         return raw, None
 
     parsed = urlparse(normalized_url)
@@ -1721,11 +1726,12 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
     off_topic_terms = [
         "strong's greek", "greek lexicon", "hebrew lexicon", "blue letter bible",
         "new testament", "old testament", "bible", "biblical", "lexicon", "concordance",
-        "meaning of ", "definition of ",
+        "meaning of ", "definition of ", "wiktionary", "dictionary", "etymology", "pronunciation",
     ]
     off_topic_domains = {
         "blueletterbible.org", "biblestudytools.com", "studybible.info", "biblehub.com",
         "biblegateway.com", "strongsnumbers.com", "abiblecommentary.com",
+        "wiktionary.org", "dictionary.com", "merriam-webster.com", "vocabulary.com",
     }
     business_terms = [
         "company", "startup", "funding", "investor", "series", "raised", "valuation",
@@ -2153,6 +2159,8 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
             score += 20
         if preferred_canonical and _canonicalize_url(href) == preferred_canonical:
             score += 30
+        if any(od in domain for od in off_topic_domains):
+            score -= 120
 
         # Penalize low-signal utility pages.
         if any(skip in href for skip in ["login", "signup", "privacy", "terms"]):
