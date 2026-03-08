@@ -1680,9 +1680,13 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
     trusted_domains = [
         "startupticker.ch",
         "venturelab.swiss",
+        "startup.ch",
+        "linkedin.com",
         "techcrunch.com",
         "crunchbase.com",
         "pitchbook.com",
+        "dealroom.co",
+        "tracxn.com",
         "sifted.eu",
         "eu-startups.com",
         "forbes.com",
@@ -1758,7 +1762,7 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
     search_errors: List[str] = []
     collect_cap = max(max_results * 4, 60)
     search_started_at = time.time()
-    search_budget_s = 32.0
+    search_budget_s = 45.0
 
     def fetch_with_fallback(ddgs_client: DDGS, q: str, limit: int) -> List[Dict[str, Any]]:
         """
@@ -1768,6 +1772,7 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
         combos = [
             ("lite", "wt-wt"),
             ("html", "wt-wt"),
+            ("lite", "ch-de"),
             ("lite", "us-en"),
             ("auto", "wt-wt"),
         ]
@@ -1985,6 +1990,65 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                         )
                         if len(cleaned_results) >= collect_cap:
                             break
+                    if len(cleaned_results) >= collect_cap:
+                        break
+                if len(cleaned_results) >= collect_cap:
+                    break
+
+        # Focused enrichment pass when source depth is still weak.
+        if len(cleaned_results) < max(10, max_results):
+            enrich_queries = [
+                f"\"{core_query}\" CEO",
+                f"\"{core_query}\" CTO",
+                f"\"{core_query}\" founders",
+                f"\"{core_query}\" funding",
+                f"\"{core_query}\" investors",
+                f"site:linkedin.com \"{core_query}\" company",
+                f"site:crunchbase.com \"{core_query}\"",
+                f"site:startupticker.ch \"{core_query}\"",
+                f"site:startup.ch \"{core_query}\"",
+            ]
+            if preferred_domain:
+                enrich_queries.append(f"site:{preferred_domain} team leadership")
+                enrich_queries.append(f"site:{preferred_domain} funding investors")
+            for eq in enrich_queries:
+                if (time.time() - search_started_at) > search_budget_s:
+                    search_errors.append("Search budget exceeded during focused enrichment phase.")
+                    break
+                try:
+                    rows = fetch_with_fallback(ddgs, eq, 8)
+                except Exception:
+                    continue
+                for r in rows:
+                    href = (r.get("href") or r.get("url") or "").strip()
+                    canonical_href = _canonicalize_url(href)
+                    if not href or canonical_href in seen_urls:
+                        continue
+                    lower_href = href.lower()
+                    domain = urlparse(lower_href).netloc.lower().replace("www.", "")
+                    text_blob = (
+                        f"{r.get('title', '')} {r.get('body') or r.get('snippet') or ''} {lower_href}"
+                    ).lower()
+                    has_business_signal = any(term in text_blob for term in business_terms)
+                    off_topic_hit = any(term in text_blob for term in off_topic_terms) or any(
+                        od in domain for od in off_topic_domains
+                    )
+                    if any(skip in lower_href for skip in ["login", "password"]):
+                        continue
+                    if any(term in text_blob for term in blocked_nsfw_terms):
+                        continue
+                    if off_topic_hit and not has_business_signal:
+                        continue
+                    seen_urls.add(canonical_href)
+                    cleaned_results.append(
+                        {
+                            "title": r.get("title", "").strip(),
+                            "body": (r.get("body") or r.get("snippet") or "").strip(),
+                            "href": href,
+                            "name_match": any(tok in text_blob for tok in startup_tokens) if startup_tokens else True,
+                            "synthetic": False,
+                        }
+                    )
                     if len(cleaned_results) >= collect_cap:
                         break
                 if len(cleaned_results) >= collect_cap:
@@ -2738,9 +2802,13 @@ def evaluate_evidence_quality(
     trusted_domains = [
         "startupticker.ch",
         "venturelab.swiss",
+        "startup.ch",
+        "linkedin.com",
         "techcrunch.com",
         "crunchbase.com",
         "pitchbook.com",
+        "dealroom.co",
+        "tracxn.com",
         "sifted.eu",
         "eu-startups.com",
         "reuters.com",
