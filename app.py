@@ -1779,6 +1779,10 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
         "porn", "porno", "xxx", "adult", "sex", "xvideos", "xnxx", "pornhub", "redtube",
         "youporn", "brazzers", "onlyfans", "escort", "cams", "camgirl",
     ]
+    off_topic_domains = {
+        "wiktionary.org", "blueletterbible.org", "biblehub.com", "biblegateway.com",
+        "dictionary.com", "merriam-webster.com", "vocabulary.com",
+    }
 
     enriched_queries = [
         core_query,
@@ -1799,6 +1803,7 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
 
     cleaned_results: List[Dict[str, Any]] = []
     seen_urls: set[str] = set()
+    target_for_ranking = max(max_results * 2, 50)
 
     def fetch_with_fallback(ddgs_client: DDGS, q: str, limit: int) -> List[Dict[str, Any]]:
         combos = [("lite", "wt-wt"), ("html", "wt-wt"), ("auto", "wt-wt"), ("lite", "us-en"), ("lite", "ch-de")]
@@ -1866,6 +1871,9 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
             canonical_href = _canonicalize_url(href)
             if not canonical_href or canonical_href in seen_urls:
                 continue
+            domain = urlparse(href).netloc.lower().replace("www.", "")
+            if any(d in domain for d in off_topic_domains):
+                continue
             text_blob = f"{r.get('title', '')} {r.get('body') or r.get('snippet') or ''} {href}".lower()
             if any(term in text_blob for term in blocked_nsfw_terms):
                 continue
@@ -1879,17 +1887,17 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                     "synthetic": False,
                 }
             )
-            if len(cleaned_results) >= max(max_results * 2, 50):
+            if len(cleaned_results) >= target_for_ranking:
                 break
 
-    per_query = max(6, max_results // 3)
+    per_query = max(8, max_results // max(2, len(enriched_queries)))
     with DDGS() as ddgs:
         for q in enriched_queries:
             rows = fetch_with_fallback(ddgs, q, per_query)
             if not rows:
                 rows = fetch_via_ddg_html(q, per_query)
             _append(rows)
-            if len(cleaned_results) >= max_results:
+            if len(cleaned_results) >= target_for_ranking:
                 break
 
     if preferred_url and len(cleaned_results) < 4:
@@ -1914,6 +1922,8 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
             score += 20
         if preferred_canonical and _canonicalize_url(href) == preferred_canonical:
             score += 30
+        if any(d in domain for d in off_topic_domains):
+            score -= 100
         return score
 
     cleaned_results.sort(key=score_result, reverse=True)
@@ -1932,7 +1942,7 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                 },
             )
 
-    return cleaned_results[: max_results + 6]
+    return cleaned_results[: max_results]
 
 
 def prepare_llm_context(
@@ -2886,7 +2896,7 @@ def generate_best_of_multiple_attempts(
             "error": None,
         }
         try:
-            results = search_duckduckgo(startup_name, max_results=30, preferred_url=preferred_url)
+            results = search_duckduckgo(startup_name, max_results=50, preferred_url=preferred_url)
         except Exception as e:
             attempt_errors.append(str(e))
             attempt_info["status"] = "search_error"
@@ -3294,7 +3304,6 @@ def main() -> None:
 
     if st.session_state.get("brief_markdown"):
         render_brief(st.session_state["brief_markdown"], st.session_state.get("search_results", []))
-
     render_deployment_diagnostics()
 
 
