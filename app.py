@@ -1811,7 +1811,7 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
         return []
 
     with DDGS() as ddgs:
-        per_query = max(3, max_results // max(1, len(enriched_queries)))
+        per_query = max(4, max_results // max(1, len(enriched_queries)))
         empty_query_streak = 0
         for q in enriched_queries:
             if (time.time() - search_started_at) > search_budget_s:
@@ -2049,6 +2049,75 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                             "synthetic": False,
                         }
                     )
+                    if len(cleaned_results) >= collect_cap:
+                        break
+                if len(cleaned_results) >= collect_cap:
+                    break
+
+        # Domain-focused rescue pass even when relevance is non-zero:
+        # helps recover leadership/funding pages from already-found company domains.
+        combined_blob = " ".join(
+            f"{r.get('title', '')} {r.get('body', '')} {r.get('href', '')}".lower()
+            for r in cleaned_results
+        )
+        leadership_signal = any(k in combined_blob for k in ["founder", "co-founder", "ceo", "cto", "cfo", "coo", "cmo", "cpo", "leadership"])
+        funding_signal = any(k in combined_blob for k in ["funding", "investor", "series", "raised", "valuation", "seed"])
+        if (
+            len(cleaned_results) < 8 or not leadership_signal or not funding_signal
+        ) and (time.time() - search_started_at) < (search_budget_s * 0.75):
+            domain_freq: Dict[str, int] = {}
+            for r in cleaned_results:
+                dom = urlparse((r.get("href") or "")).netloc.lower().replace("www.", "")
+                if not dom or any(gd in dom for gd in generic_domains):
+                    continue
+                domain_freq[dom] = domain_freq.get(dom, 0) + 1
+            top_domains = [d for d, _ in sorted(domain_freq.items(), key=lambda kv: kv[1], reverse=True)[:3]]
+            for dom in top_domains:
+                focused_queries = [
+                    f"site:{dom} {core_query} team leadership founders",
+                    f"site:{dom} {core_query} funding investors series seed",
+                    f"site:{dom} {core_query} press release",
+                ]
+                for fq in focused_queries:
+                    if (time.time() - search_started_at) > search_budget_s:
+                        search_errors.append("Search budget exceeded during domain-rescue phase.")
+                        break
+                    try:
+                        rows = fetch_with_fallback(ddgs, fq, 8)
+                    except Exception:
+                        continue
+                    for r in rows:
+                        href = (r.get("href") or r.get("url") or "").strip()
+                        canonical_href = _canonicalize_url(href)
+                        if not href or canonical_href in seen_urls:
+                            continue
+                        lower_href = href.lower()
+                        domain = urlparse(lower_href).netloc.lower().replace("www.", "")
+                        text_blob = (
+                            f"{r.get('title', '')} {r.get('body') or r.get('snippet') or ''} {lower_href}"
+                        ).lower()
+                        has_business_signal = any(term in text_blob for term in business_terms)
+                        off_topic_hit = any(term in text_blob for term in off_topic_terms) or any(
+                            od in domain for od in off_topic_domains
+                        )
+                        if any(skip in lower_href for skip in ["login", "password"]):
+                            continue
+                        if any(term in text_blob for term in blocked_nsfw_terms):
+                            continue
+                        if off_topic_hit and not has_business_signal:
+                            continue
+                        seen_urls.add(canonical_href)
+                        cleaned_results.append(
+                            {
+                                "title": r.get("title", "").strip(),
+                                "body": (r.get("body") or r.get("snippet") or "").strip(),
+                                "href": href,
+                                "name_match": any(tok in text_blob for tok in startup_tokens) if startup_tokens else True,
+                                "synthetic": False,
+                            }
+                        )
+                        if len(cleaned_results) >= collect_cap:
+                            break
                     if len(cleaned_results) >= collect_cap:
                         break
                 if len(cleaned_results) >= collect_cap:
@@ -3095,6 +3164,7 @@ def generate_best_of_multiple_attempts(
     attempt_errors: List[str] = []
     best_evidence_seen: Dict[str, Any] | None = None
     attempt_stats: List[Dict[str, Any]] = []
+    consecutive_search_failures = 0
 
     for idx in range(max(1, attempts)):
         # Backoff between attempts helps on hosted environments where
@@ -3120,13 +3190,20 @@ def generate_best_of_multiple_attempts(
             attempt_info["status"] = "search_error"
             attempt_info["error"] = str(e)
             attempt_stats.append(attempt_info)
+            consecutive_search_failures += 1
+            if best_candidate and consecutive_search_failures >= 1:
+                break
             continue
 
         if not results:
             no_signal_attempts += 1
             attempt_info["status"] = "no_signal"
             attempt_stats.append(attempt_info)
+            consecutive_search_failures += 1
+            if best_candidate and consecutive_search_failures >= 1:
+                break
             continue
+        consecutive_search_failures = 0
 
         real_results = [r for r in results if not r.get("synthetic", False)]
         attempt_info["results"] = len(results)
@@ -3214,6 +3291,9 @@ def generate_best_of_multiple_attempts(
 
         # Early stop when signal is strong enough to avoid long tails on hosted search.
         if evidence.get("enough", False) and brief_score >= 12:
+            break
+        # In balanced mode, avoid extra attempts if we already have a usable candidate.
+        if reliability_mode.lower() == "balanced" and evidence_score >= 8 and brief_score >= 10 and len(real_results) >= 5:
             break
 
     return {
