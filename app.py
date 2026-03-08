@@ -1,5 +1,4 @@
 import os
-import base64
 import datetime
 import json
 import re
@@ -70,7 +69,6 @@ def inject_meta_tags() -> None:
           'sb-motion-style-medium',
           'sb-print-style',
           'sb-dark-style',
-          'sb-video-layer',
           'sb-stage-layer'
         ];
         ids.forEach(hideInjectorContainerById);
@@ -152,26 +150,6 @@ def inject_mobile_and_print_css() -> None:
     }
     [data-testid="stAppViewContainer"] {
         position: relative !important;
-    }
-    .video-bg-wrap {
-        position: fixed;
-        inset: 0;
-        z-index: -2;
-        pointer-events: none;
-        overflow: hidden;
-    }
-    .video-bg-wrap video {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-        filter: saturate(1.02) contrast(1.06) brightness(0.88);
-    }
-    .video-bg-overlay {
-        position: absolute;
-        inset: 0;
-        background:
-            radial-gradient(circle at 50% 48%, rgba(10, 18, 40, 0.08) 0%, rgba(10, 18, 40, 0.24) 70%, rgba(10, 18, 40, 0.34) 100%),
-            linear-gradient(180deg, rgba(7, 13, 30, 0.32) 0%, rgba(7, 13, 30, 0.18) 45%, rgba(7, 13, 30, 0.36) 100%);
     }
     /* Single source of truth: persistent opaque app stage. */
     .sb-opaque-stage {
@@ -1202,38 +1180,6 @@ def inject_print_preview_css() -> None:
     )
 
 
-@st.cache_data(show_spinner=False)
-def _load_video_base64(video_path: str) -> str:
-    return base64.b64encode(Path(video_path).read_bytes()).decode("ascii")
-
-
-def render_background_video() -> None:
-    video_path: Path | None = None
-    for candidate in BACKGROUND_VIDEO_CANDIDATES:
-        if candidate.exists():
-            video_path = candidate
-            break
-    if video_path is None:
-        return
-
-    try:
-        encoded_video = _load_video_base64(str(video_path))
-    except Exception:
-        return
-
-    st.markdown(
-        f"""
-        <div id="sb-video-layer" class="video-bg-wrap" aria-hidden="true">
-            <video autoplay muted playsinline preload="auto">
-                <source src="data:video/mp4;base64,{encoded_video}" type="video/mp4">
-            </video>
-            <div class="video-bg-overlay"></div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def render_opaque_stage() -> None:
     st.markdown('<div id="sb-stage-layer" class="sb-opaque-stage" aria-hidden="true"></div>', unsafe_allow_html=True)
 
@@ -1258,14 +1204,6 @@ def inject_dark_mode_css() -> None:
         html, body, [data-testid="stAppViewContainer"] {
             background: #020969 !important;
             color: #EFFFF6 !important;
-        }
-        .video-bg-wrap video {
-            filter: saturate(0.88) contrast(1.08) brightness(0.54) !important;
-        }
-        .video-bg-overlay {
-            background:
-                radial-gradient(circle at 48% 42%, rgba(3, 15, 44, 0.2) 0%, rgba(3, 15, 44, 0.42) 70%, rgba(3, 15, 44, 0.58) 100%),
-                linear-gradient(180deg, rgba(2, 9, 24, 0.48) 0%, rgba(2, 9, 24, 0.36) 48%, rgba(2, 9, 24, 0.56) 100%) !important;
         }
         .lineart-stage {
             display: none !important;
@@ -1825,8 +1763,8 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                     )
             except Exception:
                 search_errors.append(f"Query loop failed: '{q}'")
-                        continue
-                        
+                continue
+
         # Fallback: if targeted queries are sparse/rate-limited, do a broad pass.
         if len(cleaned_results) < 6:
             fallback_queries = [query, f"{query} company", f"{query} startup"]
@@ -1846,19 +1784,19 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                             continue
                         if any(term in text_blob for term in blocked_nsfw_terms):
                             continue
-                    seen_urls.add(href)
+                        seen_urls.add(href)
                         cleaned_results.append(
                             {
-                        "title": r.get("title", "").strip(),
-                        "body": (r.get("body") or r.get("snippet") or "").strip(),
-                        "href": href,
+                                "title": r.get("title", "").strip(),
+                                "body": (r.get("body") or r.get("snippet") or "").strip(),
+                                "href": href,
                                 "name_match": name_match,
                                 "synthetic": False,
                             }
                         )
-            except Exception:
+                except Exception:
                     search_errors.append(f"Fallback query loop failed: '{fq}'")
-                continue
+                    continue
 
         # Entity discovery pass: when relevance is very low, identify probable official domain first.
         relevance_hits = 0
@@ -2766,6 +2704,18 @@ def evaluate_evidence_quality(
     }
 
 
+def _has_strict_fallback_signal(evidence: Dict[str, Any]) -> bool:
+    """Require meaningful signal before allowing strict low-signal fallback generation."""
+    if not evidence:
+        return False
+    return (
+        evidence.get("score", 0) >= 5
+        and evidence.get("unique_domains", 0) >= 2
+        and evidence.get("startup_relevance_hits", 0) >= 2
+        and evidence.get("trusted_hits", 0) >= 2
+    )
+
+
 def _brief_quality_score(brief: str, signals: Dict[str, bool]) -> tuple[int, List[str]]:
     text = (brief or "").lower()
     score = 0
@@ -3011,15 +2961,18 @@ def generate_best_of_multiple_attempts(
             continue
 
         # Very sparse results are frequently caused by hosted-search throttling.
-        # Require >=3 only for strict mode; balanced accepts >=1.
-        min_real_results = 1 if is_balanced else 3
+        # Keep at least one real hit in both modes; strict quality is enforced by evidence checks.
+        min_real_results = 1
         if len(real_results) < min_real_results:
             attempt_info["status"] = "filtered_too_few_real_results"
             attempt_stats.append(attempt_info)
             continue
 
-        # In strict mode, skip weak evidence attempts and keep trying.
-        if reliability_mode == "Strict" and not evidence.get("enough", False):
+        has_some_signal = _has_strict_fallback_signal(evidence)
+        # In strict mode, still block near-zero signal, but allow low-signal generation
+        # only when evidence is meaningful.
+        is_strict = reliability_mode.lower() == "strict"
+        if is_strict and not evidence.get("enough", False) and not has_some_signal:
             attempt_info["status"] = "filtered_strict_weak_evidence"
             attempt_stats.append(attempt_info)
             continue
@@ -3042,10 +2995,12 @@ def generate_best_of_multiple_attempts(
             "search_results": results,
             "evidence_quality": evidence,
             "low_confidence": not evidence.get("enough", False),
+            "strict_low_signal": is_strict and (not evidence.get("enough", False)) and has_some_signal,
             "rank": rank,
             "brief_score": brief_score,
         }
         attempt_info["status"] = "candidate"
+        attempt_info["strict_low_signal"] = bool(candidate["strict_low_signal"])
         attempt_info["brief_score"] = brief_score
         attempt_info["rank"] = rank
         attempt_stats.append(attempt_info)
@@ -3214,7 +3169,7 @@ def render_brief(brief_markdown: str, sources: List[Dict[str, Any]]) -> None:
         ev = st.session_state.get("evidence_quality", {}) or {}
         if st.session_state.get("strict_low_signal", False):
             st.warning(
-                "Low-signal brief in Strict mode: source quality was weak, but generation continued because some public evidence was available."
+                "Low-signal brief in Strict mode: source quality was weak, but generation continued because minimum strict fallback evidence was met."
             )
         else:
             st.warning(
@@ -3315,205 +3270,191 @@ def main() -> None:
     init_session_state()
 
     with st.container(border=True):
-    query, generate_clicked = render_header()
+        query, generate_clicked = render_header()
         render_brief_history_panel()
 
     if generate_clicked:
         if not query:
             st.warning("Please enter a startup name (and optional URL) first.")
         else:
-                security_msg = validate_user_query_security(query)
-                if security_msg:
-                    st.warning(security_msg)
-                    return
-                startup_name, preferred_url = parse_startup_input(query)
-                if not startup_name:
-                    st.warning("Please enter a startup name (and optional URL) first.")
-                    return
-                st.session_state["last_parsed_startup_name"] = startup_name
-                st.session_state["last_preferred_url"] = preferred_url
+            security_msg = validate_user_query_security(query)
+            if security_msg:
+                st.warning(security_msg)
+                return
+            startup_name, preferred_url = parse_startup_input(query)
+            if not startup_name:
+                st.warning("Please enter a startup name (and optional URL) first.")
+                return
+            st.session_state["last_parsed_startup_name"] = startup_name
+            st.session_state["last_preferred_url"] = preferred_url
 
             st.session_state["brief_markdown"] = None
-                st.session_state["search_results"] = []
+            st.session_state["search_results"] = []
             st.session_state["error"] = None
-                st.session_state["last_query"] = startup_name
+            st.session_state["last_query"] = startup_name
             st.session_state["feedback_submitted"] = False
-                st.session_state["low_confidence"] = False
-                st.session_state["strict_low_signal"] = False
-                st.session_state["evidence_quality"] = None
+            st.session_state["low_confidence"] = False
+            st.session_state["strict_low_signal"] = False
+            st.session_state["evidence_quality"] = None
 
-                loader_placeholder = st.empty()
-                eta_placeholder = st.empty()
-                render_generation_loader(loader_placeholder)
-                with st.status("Initializing scan...", expanded=True) as status:
-                    try:
-                        run_started = time.time()
-                        eta_low, eta_high = estimate_generation_window_seconds()
-                        eta_placeholder.caption(f"Estimated time: ~{eta_low}-{eta_high} seconds")
-                        reliability_mode = st.session_state.get("reliability_mode", "Balanced")
-                        status.update(label="Searching public signals and drafting brief...", state="running")
-                        run = generate_best_of_multiple_attempts(
+            loader_placeholder = st.empty()
+            eta_placeholder = st.empty()
+            render_generation_loader(loader_placeholder)
+            with st.status("Initializing scan...", expanded=True) as status:
+                try:
+                    run_started = time.time()
+                    eta_low, eta_high = estimate_generation_window_seconds()
+                    eta_placeholder.caption(f"Estimated time: ~{eta_low}-{eta_high} seconds")
+                    reliability_mode = st.session_state.get("reliability_mode", "Balanced")
+                    status.update(label="Searching public signals and drafting brief...", state="running")
+                    run = generate_best_of_multiple_attempts(
+                        startup_name=startup_name,
+                        reliability_mode=reliability_mode,
+                        attempts=3,
+                        preferred_url=preferred_url,
+                        attempt_start_index=0,
+                    )
+                    best_candidate = run.get("best_candidate")
+                    best_evidence_seen = run.get("best_evidence_seen")
+
+                    # Adaptive extension: only escalate beyond 3 if needed.
+                    if not best_candidate:
+                        status.update(label="Still searching for stable signal...", state="running")
+                        run_extra = generate_best_of_multiple_attempts(
                             startup_name=startup_name,
                             reliability_mode=reliability_mode,
-                            attempts=3,
+                            attempts=2,
                             preferred_url=preferred_url,
-                            attempt_start_index=0,
+                            attempt_start_index=3,
                         )
-                        best_candidate = run.get("best_candidate")
-                        best_evidence_seen = run.get("best_evidence_seen")
-
-                        # Adaptive extension: only escalate beyond 3 if needed.
-                        if not best_candidate:
-                            status.update(label="Still searching for stable signal...", state="running")
-                            run_extra = generate_best_of_multiple_attempts(
-                                startup_name=startup_name,
-                                reliability_mode=reliability_mode,
-                                attempts=2,
-                                preferred_url=preferred_url,
-                                attempt_start_index=3,
+                        extra_candidate = run_extra.get("best_candidate")
+                        if extra_candidate:
+                            best_candidate = extra_candidate
+                        if (
+                            best_evidence_seen is None
+                            or (
+                                run_extra.get("best_evidence_seen")
+                                and run_extra["best_evidence_seen"].get("score", 0) > best_evidence_seen.get("score", 0)
                             )
-                            extra_candidate = run_extra.get("best_candidate")
-                            if extra_candidate:
-                                best_candidate = extra_candidate
-                            if (
-                                best_evidence_seen is None
-                                or (
-                                    run_extra.get("best_evidence_seen")
-                                    and run_extra["best_evidence_seen"].get("score", 0) > best_evidence_seen.get("score", 0)
-                                )
-                            ):
-                                best_evidence_seen = run_extra.get("best_evidence_seen")
+                        ):
+                            best_evidence_seen = run_extra.get("best_evidence_seen")
 
-                            run["attempt_stats"] = (run.get("attempt_stats") or []) + (run_extra.get("attempt_stats") or [])
-                            run["attempt_errors"] = (run.get("attempt_errors") or []) + (run_extra.get("attempt_errors") or [])
-                            run["no_signal_attempts"] = int(run.get("no_signal_attempts", 0)) + int(run_extra.get("no_signal_attempts", 0))
-                            if not run.get("best_candidate") and extra_candidate:
-                                run["best_candidate"] = extra_candidate
+                        run["attempt_stats"] = (run.get("attempt_stats") or []) + (run_extra.get("attempt_stats") or [])
+                        run["attempt_errors"] = (run.get("attempt_errors") or []) + (run_extra.get("attempt_errors") or [])
+                        run["no_signal_attempts"] = int(run.get("no_signal_attempts", 0)) + int(run_extra.get("no_signal_attempts", 0))
+                        if not run.get("best_candidate") and extra_candidate:
+                            run["best_candidate"] = extra_candidate
 
-                        st.session_state["last_run_diagnostics"] = run
+                    st.session_state["last_run_diagnostics"] = run
 
-                        if not best_candidate:
-                            if run.get("no_signal_attempts", 0) >= 3:
-                        status.update(label="No public signal found.", state="error")
-                                attempt_stats = run.get("attempt_stats") or []
-                                blocked_like = sum(
-                                    1 for a in attempt_stats if a.get("status") in {"search_blocked_or_empty", "no_signal"}
-                                )
-                                if blocked_like >= 2:
-                                    st.warning(
-                                        "Search provider returned too few results on this deployment run. "
-                                        "Please retry in ~30-60s or add more specific keywords (country/category)."
-                                    )
-                                else:
-                                    st.warning(
-                                        "No public signal found. The company might be in stealth. Try adding an exact URL."
-                                    )
-                        return
-
-                            if best_evidence_seen and best_evidence_seen.get("startup_relevance_hits", 0) == 0:
-                                st.session_state["evidence_quality"] = best_evidence_seen
-                                status.update(label="No startup-matching signal found.", state="error")
+                    if not best_candidate:
+                        if run.get("no_signal_attempts", 0) >= 3:
+                            status.update(label="No public signal found.", state="error")
+                            attempt_stats = run.get("attempt_stats") or []
+                            blocked_like = sum(
+                                1 for a in attempt_stats if a.get("status") in {"search_blocked_or_empty", "no_signal"}
+                            )
+                            if blocked_like >= 2:
                                 st.warning(
-                                    "Search results did not reliably match this startup name. "
-                                    "Try adding the exact website URL or a more specific legal/company name."
+                                    "Search provider returned too few results on this deployment run. "
+                                    "Please retry in ~30-60s or add more specific keywords (country/category)."
                                 )
-                                return
-
-                            if reliability_mode == "Strict" and best_evidence_seen and not best_evidence_seen.get("enough", False):
-                                # Strict fallback: allow generation if there is at least some public signal,
-                                # but mark explicitly as low-signal strict output.
-                                has_some_signal = (
-                                    best_evidence_seen.get("unique_domains", 0) >= 1
-                                    and (
-                                        best_evidence_seen.get("startup_relevance_hits", 0) >= 1
-                                        or best_evidence_seen.get("trusted_hits", 0) >= 1
-                                    )
+                            else:
+                                st.warning(
+                                    "No public signal found. The company might be in stealth. Try adding an exact URL."
                                 )
-                                if not has_some_signal:
-                                    st.session_state["evidence_quality"] = best_evidence_seen
-                                    status.update(label="Insufficient high-quality public signal.", state="error")
-                                    st.warning(
-                                        "Signal quality is too weak for a reliable brief. "
-                                        "Add the exact company URL, country, or legal entity name and retry."
-                                    )
-                                    st.info(
-                                        f"Quality score: {best_evidence_seen['score']} | Trusted sources: {best_evidence_seen['trusted_hits']} | "
-                                        f"Unique domains: {best_evidence_seen['unique_domains']} | "
-                                        f"Startup relevance hits: {best_evidence_seen['startup_relevance_hits']}"
-                                    )
-                                    if best_evidence_seen.get("reasons"):
-                                        st.caption("Weak areas: " + "; ".join(best_evidence_seen["reasons"]))
-                                    return
-
-                            status.update(label="Unable to generate a stable brief.", state="error")
-                            details = run.get("attempt_errors", [])
-                            if details:
-                                st.caption("Attempt diagnostics: " + " | ".join(details[:2]))
-                            st.warning(
-                                "Could not generate a reliable brief this run. Please retry with an exact company URL."
-                            )
                             return
 
-                        st.session_state["brief_markdown"] = best_candidate["brief_markdown"]
-                        st.session_state["search_results"] = best_candidate["search_results"]
-                        st.session_state["evidence_quality"] = best_candidate["evidence_quality"]
-                        st.session_state["low_confidence"] = bool(best_candidate["low_confidence"])
-                        if (
-                            st.session_state["evidence_quality"].get("startup_relevance_hits", 0) == 0
-                            and not preferred_url
-                        ):
+                        if best_evidence_seen and best_evidence_seen.get("startup_relevance_hits", 0) == 0:
+                            st.session_state["evidence_quality"] = best_evidence_seen
                             status.update(label="No startup-matching signal found.", state="error")
                             st.warning(
-                                "Search results did not clearly match this startup. "
-                                "Please add the exact website URL (e.g., company.com) and retry."
+                                "Search results did not reliably match this startup name. "
+                                "Try adding the exact website URL or a more specific legal/company name."
                             )
-                            st.session_state["brief_markdown"] = None
                             return
-                        if (
-                            reliability_mode == "Strict"
-                            and st.session_state["low_confidence"]
-                            and not st.session_state["evidence_quality"].get("enough", False)
-                        ):
-                            st.session_state["strict_low_signal"] = True
 
-                        if len(best_candidate["search_results"]) < 4:
-                            st.info("Limited public signal found; brief quality may be lower. Try adding exact website URL.")
+                        if reliability_mode.lower() == "strict" and best_evidence_seen and not best_evidence_seen.get("enough", False):
+                            has_some_signal = _has_strict_fallback_signal(best_evidence_seen)
+                            if not has_some_signal:
+                                st.session_state["evidence_quality"] = best_evidence_seen
+                                status.update(label="Insufficient high-quality public signal.", state="error")
+                                st.warning(
+                                    "Signal quality is too weak for a reliable brief. "
+                                    "Add the exact company URL, country, or legal entity name and retry."
+                                )
+                                st.info(
+                                    f"Quality score: {best_evidence_seen['score']} | Trusted sources: {best_evidence_seen['trusted_hits']} | "
+                                    f"Unique domains: {best_evidence_seen['unique_domains']} | "
+                                    f"Startup relevance hits: {best_evidence_seen['startup_relevance_hits']}"
+                                )
+                                if best_evidence_seen.get("reasons"):
+                                    st.caption("Weak areas: " + "; ".join(best_evidence_seen["reasons"]))
+                                return
 
-                        history = st.session_state.get("brief_history", [])
-                        history.insert(
-                            0,
-                            {
-                                "query": startup_name,
-                                "timestamp": datetime.datetime.now(ZoneInfo("Europe/Zurich")).strftime("%Y-%m-%d %H:%M"),
-                                "brief_markdown": st.session_state["brief_markdown"],
-                                "search_results": st.session_state["search_results"],
-                                "low_confidence": st.session_state.get("low_confidence", False),
-                                "evidence_quality": st.session_state.get("evidence_quality"),
-                            },
+                        status.update(label="Unable to generate a stable brief.", state="error")
+                        details = run.get("attempt_errors", [])
+                        if details:
+                            st.caption("Attempt diagnostics: " + " | ".join(details[:2]))
+                        st.warning(
+                            "Could not generate a reliable brief this run. Please retry with an exact company URL."
                         )
-                        st.session_state["brief_history"] = history[:5]
-                        elapsed = int(time.time() - run_started)
-                        durations = st.session_state.get("generation_durations", [])
-                        durations.append(elapsed)
-                        st.session_state["generation_durations"] = durations[-20:]
-                        status.update(label=f"Dossier ready in {elapsed}s.", state="complete")
+                        return
+
+                    st.session_state["brief_markdown"] = best_candidate["brief_markdown"]
+                    st.session_state["search_results"] = best_candidate["search_results"]
+                    st.session_state["evidence_quality"] = best_candidate["evidence_quality"]
+                    st.session_state["low_confidence"] = bool(best_candidate["low_confidence"])
+                    st.session_state["strict_low_signal"] = bool(best_candidate.get("strict_low_signal", False))
+                    if (
+                        st.session_state["evidence_quality"].get("startup_relevance_hits", 0) == 0
+                        and not preferred_url
+                    ):
+                        status.update(label="No startup-matching signal found.", state="error")
+                        st.warning(
+                            "Search results did not clearly match this startup. "
+                            "Please add the exact website URL (e.g., company.com) and retry."
+                        )
+                        st.session_state["brief_markdown"] = None
+                        return
+                    if len(best_candidate["search_results"]) < 4:
+                        st.info("Limited public signal found; brief quality may be lower. Try adding exact website URL.")
+
+                    history = st.session_state.get("brief_history", [])
+                    history.insert(
+                        0,
+                        {
+                            "query": startup_name,
+                            "timestamp": datetime.datetime.now(ZoneInfo("Europe/Zurich")).strftime("%Y-%m-%d %H:%M"),
+                            "brief_markdown": st.session_state["brief_markdown"],
+                            "search_results": st.session_state["search_results"],
+                            "low_confidence": st.session_state.get("low_confidence", False),
+                            "evidence_quality": st.session_state.get("evidence_quality"),
+                        },
+                    )
+                    st.session_state["brief_history"] = history[:5]
+                    elapsed = int(time.time() - run_started)
+                    durations = st.session_state.get("generation_durations", [])
+                    durations.append(elapsed)
+                    st.session_state["generation_durations"] = durations[-20:]
+                    status.update(label=f"Dossier ready in {elapsed}s.", state="complete")
                 except Exception as e:
-                        st.session_state["error"] = sanitize_exception_for_display(str(e))
+                    st.session_state["error"] = sanitize_exception_for_display(str(e))
                     status.update(label="Error while generating dossier.", state="error")
-                    finally:
-                        loader_placeholder.empty()
-                        eta_placeholder.empty()
+                finally:
+                    loader_placeholder.empty()
+                    eta_placeholder.empty()
 
     if st.session_state.get("error"):
-            st.error(
-                "There was an issue generating this brief. This may be due to an API timeout or configuration problem.\n\n"
-                f"Details: {st.session_state['error']}"
-            )
+        st.error(
+            "There was an issue generating this brief. This may be due to an API timeout or configuration problem.\n\n"
+            f"Details: {st.session_state['error']}"
+        )
 
     if st.session_state.get("brief_markdown"):
-            render_brief(st.session_state["brief_markdown"], st.session_state.get("search_results", []))
+        render_brief(st.session_state["brief_markdown"], st.session_state.get("search_results", []))
 
-        render_deployment_diagnostics()
+    render_deployment_diagnostics()
 
 
 if __name__ == "__main__":
