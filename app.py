@@ -10,7 +10,7 @@ from html import escape
 from pathlib import Path
 from typing import List, Dict, Any
 from urllib.error import URLError, HTTPError
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, parse_qs, quote_plus, unquote, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
@@ -1834,6 +1834,14 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                 f"\"{preferred_domain}\" {core_query} startup",
             ]
         )
+        if preferred_domain.endswith(".com"):
+            alt_ch = preferred_domain[:-4] + ".ch"
+            enriched_queries.extend(
+                [
+                    f"site:{alt_ch} {core_query}",
+                    f"\"{core_query}\" site:{alt_ch} team leadership funding",
+                ]
+            )
 
     cleaned_results: List[Dict[str, Any]] = []
     seen_urls = set()
@@ -1888,6 +1896,59 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
             search_errors.append(f"Query '{q}' failed across backends ({'; '.join(backend_errors[:8])})")
         return []
 
+    def fetch_via_ddg_html(q: str, limit: int) -> List[Dict[str, Any]]:
+        """
+        Secondary fallback: query DuckDuckGo HTML endpoint directly when DDGS fails.
+        """
+        try:
+            url = f"https://duckduckgo.com/html/?q={quote_plus(q)}"
+            req = Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; SmartBriefsBot/1.0)"})
+            with urlopen(req, timeout=8.0) as resp:
+                html = resp.read().decode("utf-8", errors="ignore")
+        except Exception:
+            return []
+
+        rows: List[Dict[str, Any]] = []
+        seen_links = set()
+
+        link_candidates = re.findall(
+            r'(?is)<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+            html,
+        )
+        if not link_candidates:
+            link_candidates = re.findall(r'(?is)<a[^>]+href="([^"]+uddg=[^"]+)"[^>]*>(.*?)</a>', html)
+
+        for href_raw, title_html in link_candidates:
+            href = href_raw
+            if "uddg=" in href:
+                try:
+                    qs = parse_qs(urlparse(href).query)
+                    uddg = qs.get("uddg", [""])[0]
+                    if uddg:
+                        href = unquote(uddg)
+                except Exception:
+                    pass
+            href = (href or "").strip()
+            if not href or href in seen_links:
+                continue
+            if not href.startswith("http"):
+                continue
+            seen_links.add(href)
+            title = re.sub(r"(?is)<[^>]+>", " ", title_html or "")
+            title = re.sub(r"\s+", " ", title).strip()
+            rows.append(
+                {
+                    "title": title,
+                    "body": "",
+                    "href": href,
+                    "name_match": True,
+                    "synthetic": False,
+                }
+            )
+            if len(rows) >= max(3, limit):
+                break
+        return rows
+
     def fetch_exhaustive(ddgs_client: DDGS, q: str, limit: int) -> List[Dict[str, Any]]:
         """Slower but broader fallback used only when signal is weak."""
         backend_errors: List[str] = []
@@ -1932,6 +1993,9 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                 backend_errors.append(f"{backend}/{region}: request failed")
         if backend_errors:
             search_errors.append(f"Exhaustive query '{q}' failed ({'; '.join(backend_errors[:8])})")
+        rows = fetch_via_ddg_html(q, limit)
+        if rows:
+            return rows
         return []
 
     with DDGS() as ddgs:
@@ -1943,6 +2007,8 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                 break
             try:
                 results = fetch_with_fallback(ddgs, q, per_query)
+                if not results:
+                    results = fetch_via_ddg_html(q, per_query)
                 if not results:
                     empty_query_streak += 1
                     if empty_query_streak >= 4 and not cleaned_results:
@@ -2000,6 +2066,8 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                     break
                 try:
                     results = fetch_with_fallback(ddgs, fq, 10)
+                    if not results:
+                        results = fetch_via_ddg_html(fq, 10)
                     for r in results:
                         href = (r.get("href") or r.get("url") or "").strip()
                         canonical_href = _canonicalize_url(href)
@@ -2059,6 +2127,8 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                     break
                 try:
                     dres = fetch_with_fallback(ddgs, dq, 8)
+                    if not dres:
+                        dres = fetch_via_ddg_html(dq, 8)
                 except Exception:
                     continue
                 for r in dres:
@@ -2080,6 +2150,8 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                         break
                     try:
                         dres = fetch_with_fallback(ddgs, q, 8)
+                        if not dres:
+                            dres = fetch_via_ddg_html(q, 8)
                     except Exception:
                         continue
                     for r in dres:
@@ -2141,6 +2213,8 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                     break
                 try:
                     rows = fetch_with_fallback(ddgs, eq, 8)
+                    if not rows:
+                        rows = fetch_via_ddg_html(eq, 8)
                 except Exception:
                     continue
                 for r in rows:
@@ -3150,6 +3224,8 @@ def evaluate_evidence_quality(
         reasons.append("missing competitor signal")
 
     enough = (
+        len(search_results) >= min_results
+        and
         score >= 8
         and len(unique_domains) >= 3
         and trusted_hits >= min_trusted_hits
