@@ -1786,20 +1786,10 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
 
     enriched_queries = [
         core_query,
-        f"\"{core_query}\" startup",
-        f"\"{core_query}\" founders leadership team",
-        f"\"{core_query}\" CEO CTO CFO COO CMO CPO",
-        f"\"{core_query}\" funding investors",
-        f"\"{core_query}\" competitors alternatives",
+        f"\"{core_query}\" startup OR funding OR founders",
     ]
     if preferred_domain:
-        enriched_queries.extend(
-            [
-                f"site:{preferred_domain} {core_query}",
-                f"site:{preferred_domain} team",
-                f"site:{preferred_domain} funding investors",
-            ]
-        )
+        enriched_queries.append(f"site:{preferred_domain}")
 
     cleaned_results: List[Dict[str, Any]] = []
     seen_urls: set[str] = set()
@@ -1890,13 +1880,13 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
             if len(cleaned_results) >= target_for_ranking:
                 break
 
-    per_query = max(8, max_results // max(2, len(enriched_queries)))
+    per_query = max(10, max_results // max(1, len(enriched_queries)))
     with DDGS() as ddgs:
         for q in enriched_queries:
             rows = fetch_with_fallback(ddgs, q, per_query)
-            if not rows:
-                rows = fetch_via_ddg_html(q, per_query)
             _append(rows)
+            # Prevent immediate DDG/WAF throttling on hosted environments.
+            time.sleep(2.0)
             if len(cleaned_results) >= target_for_ranking:
                 break
 
