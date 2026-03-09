@@ -6,6 +6,7 @@ import time
 import platform
 import sys
 import importlib.metadata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from html import escape
 from pathlib import Path
 from typing import List, Dict, Any
@@ -1944,23 +1945,67 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
         )
         return any(term in blob for term in competitor_terms)
 
-    per_query = max(10, max_results // max(1, len(enriched_queries)))
+    def _has_leadership_signal(rows: List[Dict[str, Any]]) -> bool:
+        blob = " ".join(
+            f"{r.get('title', '')} {r.get('body', '')} {r.get('href', '')}".lower()
+            for r in rows
+        )
+        leadership_terms = (
+            "founder",
+            "co-founder",
+            "ceo",
+            "cto",
+            "cfo",
+            "coo",
+            "cmo",
+            "cpo",
+            "leadership",
+            "management team",
+        )
+        return any(term in blob for term in leadership_terms)
+
+    per_query = max(12, max_results // max(1, len(enriched_queries)))
     serper_used = False
+    serper_api_key = get_config_value("SERPER_API_KEY")
     serper_queries = [
         core_query,
         f"{core_query} startup founders funding",
         f"{core_query} competitors alternatives similar companies",
+        f"{core_query} CEO CTO CFO COO CMO CPO leadership",
+        f"site:linkedin.com {core_query} founder CEO CTO",
+        f"site:crunchbase.com {core_query}",
+        f"site:pitchbook.com {core_query}",
     ]
     if preferred_domain:
-        serper_queries.append(f"site:{preferred_domain} {core_query}")
-    for q in serper_queries:
-        rows = fetch_serper(q, per_query)
-        if not rows:
-            continue
-        serper_used = True
-        _append(rows)
-        if len(cleaned_results) >= target_for_ranking:
-            break
+        serper_queries.extend(
+            [
+                f"site:{preferred_domain} {core_query}",
+                f"site:{preferred_domain} team leadership founders",
+                f"site:{preferred_domain} funding investors",
+            ]
+        )
+
+    if serper_api_key:
+        # Fast path: run multiple high-signal Serper queries concurrently.
+        with ThreadPoolExecutor(max_workers=min(6, len(serper_queries))) as pool:
+            futures = {pool.submit(fetch_serper, q, per_query): q for q in serper_queries}
+            for fut in as_completed(futures):
+                rows = fut.result() or []
+                if not rows:
+                    continue
+                serper_used = True
+                _append(rows)
+                if len(cleaned_results) >= target_for_ranking:
+                    break
+    else:
+        for q in serper_queries:
+            rows = fetch_serper(q, per_query)
+            if not rows:
+                continue
+            serper_used = True
+            _append(rows)
+            if len(cleaned_results) >= target_for_ranking:
+                break
 
     if not serper_used:
         # Fall back to DDG only when Serper isn't configured/available.
@@ -1978,6 +2023,15 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
         competitor_query = f"{core_query} competitors alternatives similar companies"
         rows = fetch_serper(competitor_query, max(8, per_query))
         _append(rows)
+
+    # Targeted leadership rescue: one extra request only if founder/C-level signal is missing.
+    if len(cleaned_results) < target_for_ranking and not _has_leadership_signal(cleaned_results):
+        leadership_query = f"{core_query} founder co-founder CEO CTO leadership team"
+        rows = fetch_serper(leadership_query, max(8, per_query))
+        _append(rows)
+        if preferred_domain:
+            rows = fetch_serper(f"site:{preferred_domain} team leadership founders", max(8, per_query))
+            _append(rows)
 
     if preferred_url and len(cleaned_results) < 4:
         _append(_fallback_from_preferred_domain(preferred_url, startup_tokens))
@@ -2001,6 +2055,12 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
             score += 20
         if preferred_canonical and _canonicalize_url(href) == preferred_canonical:
             score += 30
+        if "linkedin.com" in domain:
+            score += 8
+        if any(seg in href for seg in ["/team", "/about", "/leadership", "/founders", "/management"]):
+            score += 7
+        if any(term in text for term in ["founder", "co-founder", "ceo", "cto", "cfo", "coo", "cmo", "cpo"]):
+            score += 10
         if any(d in domain for d in off_topic_domains):
             score -= 100
         return score
@@ -2175,6 +2235,7 @@ def build_llm_prompt(startup_name: str, search_results: List[Dict[str, Any]]) ->
         "You are a ruthless Swiss deep-tech VC analyst for EuroUS Ventures. Use ONLY supplied results.\n"
         "Prioritize: scientific moat, EU->US geo-arbitrage, funding/investors, C-level leadership "
         "(CEO/CTO/CFO/COO/CMO/CPO), traction milestones, and competitors.\n\n"
+        "If founder/C-level names are present in evidence, list them explicitly under Founders & Leadership as Name — Role.\n\n"
         "Icebreakers (strict): exactly 3 bullets; each is a short conversational question ending in '?'; "
         "fact-grounded; if leadership exists, first bullet should reference it.\n\n"
         "Return markdown in this EXACT section order:\n"
@@ -3339,11 +3400,13 @@ def main() -> None:
                     eta_low, eta_high = estimate_generation_window_seconds()
                     eta_placeholder.caption(f"Estimated time: ~{eta_low}-{eta_high} seconds")
                     reliability_mode = st.session_state.get("reliability_mode", "Balanced")
+                    serper_enabled = bool(get_config_value("SERPER_API_KEY"))
+                    attempts_to_run = 1 if serper_enabled else 3
                     status.update(label="Searching public signals and drafting brief...", state="running")
                     run = generate_best_of_multiple_attempts(
                         startup_name=startup_name,
                         reliability_mode=reliability_mode,
-                        attempts=3,
+                        attempts=attempts_to_run,
                         preferred_url=preferred_url,
                         attempt_start_index=0,
                     )
