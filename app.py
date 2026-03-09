@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+import requests
 from duckduckgo_search import DDGS
 from openai import OpenAI
 
@@ -1795,6 +1796,38 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
     seen_urls: set[str] = set()
     target_for_ranking = max(max_results * 2, 50)
 
+    def fetch_serper(q: str, limit: int) -> List[Dict[str, Any]]:
+        api_key = get_config_value("SERPER_API_KEY")
+        if not api_key:
+            return []
+        try:
+            resp = requests.post(
+                "https://google.serper.dev/search",
+                headers={
+                    "X-API-KEY": api_key,
+                    "Content-Type": "application/json",
+                },
+                json={"q": q, "num": max(3, min(limit, 20))},
+                timeout=12,
+            )
+            if resp.status_code != 200:
+                return []
+            data = resp.json() or {}
+        except Exception:
+            return []
+
+        rows: List[Dict[str, Any]] = []
+        for item in data.get("organic", []) or []:
+            rows.append(
+                {
+                    "title": (item.get("title") or "").strip(),
+                    "body": (item.get("snippet") or "").strip(),
+                    "href": (item.get("link") or "").strip(),
+                    "synthetic": False,
+                }
+            )
+        return rows
+
     def fetch_with_fallback(ddgs_client: DDGS, q: str, limit: int) -> List[Dict[str, Any]]:
         combos = [("lite", "wt-wt"), ("html", "wt-wt"), ("auto", "wt-wt"), ("lite", "us-en"), ("lite", "ch-de")]
         for backend, region in combos:
@@ -1881,14 +1914,32 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                 break
 
     per_query = max(10, max_results // max(1, len(enriched_queries)))
-    with DDGS() as ddgs:
-        for q in enriched_queries:
-            rows = fetch_with_fallback(ddgs, q, per_query)
-            _append(rows)
-            # Prevent immediate DDG/WAF throttling on hosted environments.
-            time.sleep(2.0)
-            if len(cleaned_results) >= target_for_ranking:
-                break
+    serper_used = False
+    serper_queries = [
+        core_query,
+        f"{core_query} startup founders funding",
+    ]
+    if preferred_domain:
+        serper_queries.append(f"site:{preferred_domain} {core_query}")
+    for q in serper_queries:
+        rows = fetch_serper(q, per_query)
+        if not rows:
+            continue
+        serper_used = True
+        _append(rows)
+        if len(cleaned_results) >= target_for_ranking:
+            break
+
+    if not serper_used:
+        # Fall back to DDG only when Serper isn't configured/available.
+        with DDGS() as ddgs:
+            for q in enriched_queries:
+                rows = fetch_with_fallback(ddgs, q, per_query)
+                _append(rows)
+                # Prevent immediate DDG/WAF throttling on hosted environments.
+                time.sleep(2.0)
+                if len(cleaned_results) >= target_for_ranking:
+                    break
 
     if preferred_url and len(cleaned_results) < 4:
         _append(_fallback_from_preferred_domain(preferred_url, startup_tokens))
