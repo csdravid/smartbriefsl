@@ -179,8 +179,8 @@ def inject_mobile_and_print_css() -> None:
         width: min(100%, 920px) !important;
         margin-left: auto !important;
         margin-right: auto !important;
-        padding-left: 0.8rem !important;
-        padding-right: 0.8rem !important;
+        padding-left: 1.2rem !important;
+        padding-right: 1.2rem !important;
     }
     [data-testid="stAppViewContainer"] > .main,
     [data-testid="stAppViewContainer"] .main,
@@ -219,7 +219,7 @@ def inject_mobile_and_print_css() -> None:
         opacity: 1 !important;
         border: 1px solid #c6d6e8 !important;
         box-shadow: 0 26px 56px rgba(2, 10, 30, 0.42) !important;
-        padding: 0 0.15rem 0.2rem 0.15rem !important;
+        padding: 0 0.75rem 0.35rem 0.75rem !important;
         position: relative !important;
         top: -0.45rem !important;
     }
@@ -239,8 +239,8 @@ def inject_mobile_and_print_css() -> None:
     .block-container {
         padding-top: 0 !important;
         padding-bottom: var(--space-6);
-        padding-left: 0.8rem;
-        padding-right: 0.8rem;
+        padding-left: 1.1rem;
+        padding-right: 1.1rem;
         max-width: 920px;
         margin: 0 auto !important;
         background-color: transparent !important;
@@ -1772,6 +1772,17 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
         preferred_domain = parsed_preferred.netloc.lower().replace("www.", "")
         preferred_canonical = _canonicalize_url(preferred_url)
 
+    # Cache search results briefly to save external query budget.
+    cache = st.session_state.get("search_result_cache")
+    if not isinstance(cache, dict):
+        cache = {}
+        st.session_state["search_result_cache"] = cache
+    cache_key = f"{core_query.lower()}|{preferred_canonical}|{max_results}"
+    now_ts = time.time()
+    cached = cache.get(cache_key)
+    if cached and (now_ts - float(cached.get("ts", 0))) <= 600 and isinstance(cached.get("rows"), list):
+        return cached.get("rows", [])
+
     trusted_domains = [
         "startupticker.ch", "venturelab.swiss", "startup.ch", "linkedin.com",
         "crunchbase.com", "pitchbook.com", "sifted.eu", "eu-startups.com",
@@ -1788,6 +1799,7 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
     enriched_queries = [
         core_query,
         f"\"{core_query}\" startup OR funding OR founders",
+        f"\"{core_query}\" competitors alternatives similar companies",
     ]
     if preferred_domain:
         enriched_queries.append(f"site:{preferred_domain}")
@@ -1913,11 +1925,31 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
             if len(cleaned_results) >= target_for_ranking:
                 break
 
+    def _has_competitor_signal(rows: List[Dict[str, Any]]) -> bool:
+        blob = " ".join(
+            f"{r.get('title', '')} {r.get('body', '')} {r.get('href', '')}".lower()
+            for r in rows
+        )
+        competitor_terms = (
+            "competitor",
+            "competitors",
+            "alternatives",
+            "similar companies",
+            "similar to",
+            "rival",
+            "incumbent",
+            "market leader",
+            "vs ",
+            "compare",
+        )
+        return any(term in blob for term in competitor_terms)
+
     per_query = max(10, max_results // max(1, len(enriched_queries)))
     serper_used = False
     serper_queries = [
         core_query,
         f"{core_query} startup founders funding",
+        f"{core_query} competitors alternatives similar companies",
     ]
     if preferred_domain:
         serper_queries.append(f"site:{preferred_domain} {core_query}")
@@ -1940,6 +1972,12 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                 time.sleep(2.0)
                 if len(cleaned_results) >= target_for_ranking:
                     break
+
+    # Targeted competitor rescue: one extra request only if signal is still missing.
+    if len(cleaned_results) < target_for_ranking and not _has_competitor_signal(cleaned_results):
+        competitor_query = f"{core_query} competitors alternatives similar companies"
+        rows = fetch_serper(competitor_query, max(8, per_query))
+        _append(rows)
 
     if preferred_url and len(cleaned_results) < 4:
         _append(_fallback_from_preferred_domain(preferred_url, startup_tokens))
@@ -1983,14 +2021,19 @@ def search_duckduckgo(query: str, max_results: int = 30, preferred_url: str | No
                 },
             )
 
-    return cleaned_results[: max_results]
+    final_rows = cleaned_results[: max_results]
+    cache[cache_key] = {"ts": now_ts, "rows": final_rows}
+    if len(cache) > 60:
+        recent = sorted(cache.items(), key=lambda kv: float(kv[1].get("ts", 0)), reverse=True)[:40]
+        st.session_state["search_result_cache"] = dict(recent)
+    return final_rows
 
 
 def prepare_llm_context(
     search_results: List[Dict[str, Any]],
-    max_results: int = 14,
+    max_results: int = 9,
     max_per_domain: int = 2,
-    snippet_char_limit: int = 320,
+    snippet_char_limit: int = 220,
 ) -> List[Dict[str, Any]]:
     """
     Reduce token usage before prompt construction:
@@ -2090,9 +2133,9 @@ def get_cached_normalized_context(
 
     context = prepare_llm_context(
         search_results,
-        max_results=14,
+        max_results=9,
         max_per_domain=2,
-        snippet_char_limit=320,
+        snippet_char_limit=220,
     )
     cache[key] = {"ts": now, "fingerprint": fp, "context": context}
     st.session_state["last_context_cache_status"] = "miss"
@@ -2617,7 +2660,19 @@ def _evidence_signals(search_results: List[Dict[str, Any]]) -> Dict[str, bool]:
     ).lower()
     leadership_terms = ["founder", "co-founder", "ceo", "cto", "cfo", "coo", "cmo", "cpo", "leadership"]
     funding_terms = ["seed", "series", "raised", "funding", "investor", "valuation", "round"]
-    competitor_terms = ["competitor", "alternative", "vs", "rival", "incumbent", "market leader"]
+    competitor_terms = [
+        "competitor",
+        "competitors",
+        "alternative",
+        "alternatives",
+        "similar companies",
+        "similar to",
+        "compare",
+        "vs",
+        "rival",
+        "incumbent",
+        "market leader",
+    ]
     traction_terms = ["launch", "pilot", "customer", "revenue", "deployment", "installed", "partnership"]
     return {
         "leadership": any(t in blob for t in leadership_terms),
@@ -2832,14 +2887,14 @@ def _dynamic_max_tokens(startup_name: str, search_results: List[Dict[str, Any]],
     signal_count = sum(1 for v in signals.values() if v)
 
     # Base budget tuned for the current response format.
-    if ctx_count <= 5:
-        budget = 980
-    elif ctx_count <= 9:
-        budget = 1180
-    elif ctx_count <= 12:
-        budget = 1360
+    if ctx_count <= 4:
+        budget = 760
+    elif ctx_count <= 7:
+        budget = 900
+    elif ctx_count <= 10:
+        budget = 1040
     else:
-        budget = 1520
+        budget = 1160
 
     # Small bump for richer multi-signal evidence.
     if signal_count >= 3:
@@ -2849,9 +2904,9 @@ def _dynamic_max_tokens(startup_name: str, search_results: List[Dict[str, Any]],
 
     # Repair pass may need slightly more room to fix structure gaps.
     if is_repair:
-        budget += 120
+        budget += 90
 
-    return max(850, min(1700, budget))
+    return max(680, min(1250, budget))
 
 
 def generate_consistent_brief(startup_name: str, search_results: List[Dict[str, Any]]) -> str:
@@ -3226,6 +3281,7 @@ def init_session_state() -> None:
         "last_parsed_startup_name": None,
         "last_preferred_url": None,
         "normalized_context_cache": {},
+        "search_result_cache": {},
         "last_context_cache_status": None,
         "last_context_cache_age_s": 0,
         "last_context_cache_items": 0,
